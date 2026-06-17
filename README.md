@@ -7,4 +7,4 @@ Desktop AI application built with Tauri, React, and Supabase.
 ```bash
 npm install
 npm run tauri:dev
-```
+``
