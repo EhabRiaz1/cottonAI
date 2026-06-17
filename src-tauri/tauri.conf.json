@@ -1,0 +1,67 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Cotton AI",
+  "version": "0.1.0",
+  "identifier": "com.cottonai.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Cotton AI",
+        "label": "main",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 1000,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "decorations": true,
+        "transparent": false,
+        "shadow": true,
+        "acceptFirstMouse": true,
+        "tabbingIdentifier": "cotton-ai"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://kvixqlpjmqwmoiuxizuz.supabase.co wss://kvixqlpjmqwmoiuxizuz.supabase.co https://api.anthropic.com; img-src 'self' data: https:; script-src 'self' 'unsafe-inline' blob: asset:"
+    },
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Finance",
+    "shortDescription": "Predictive intelligence for cotton procurement",
+    "longDescription": "Cotton AI provides predictive procurement intelligence for textile mills, helping them make better buying, hedging, and timing decisions using proprietary fixation data and machine learning.",
+    "copyright": "© 2026 Cotton AI Inc.",
+    "macOS": {
+      "entitlements": null,
+      "exceptionDomain": null,
+      "frameworks": [],
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-",
+      "dmg": {
+        "background": "dmg-background.png",
+        "windowSize": { "width": 540, "height": 380 },
+        "appPosition": { "x": 160, "y": 190 },
+        "applicationFolderPosition": { "x": 380, "y": 190 }
+      }
+    }
+  }
+}

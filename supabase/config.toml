@@ -1,0 +1,7 @@
+# Supabase project (linked for CLI: supabase link --project-ref kvixqlpjmqwmoiuxizuz)
+
+[functions.ingest_sheet]
+verify_jwt = true
+
+[functions.chat]
+verify_jwt = true
