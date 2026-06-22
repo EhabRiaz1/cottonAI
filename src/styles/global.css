@@ -3429,3 +3429,90 @@ body::after {
     opacity: 1;
   }
 }
+
+/* Rich markdown rendering for the mailbox agent (organized, not a dump). */
+.md {
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+/* Blinking "thinking" badge for the mailbox agent. */
+@keyframes cottonBlink {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.25; transform: scale(0.7); }
+}
+.thinking-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  color: var(--gold-bright, #dbbd84);
+  letter-spacing: 0.2px;
+}
+.thinking-badge .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--gold-bright, #dbbd84);
+  box-shadow: 0 0 10px rgba(219, 189, 132, 0.7);
+  animation: cottonBlink 1.05s ease-in-out infinite;
+}
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+.md h1, .md h2, .md h3, .md h4 {
+  font-family: "Cormorant Garamond", serif;
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 16px 0 7px;
+  color: var(--gold-bright, #dbbd84);
+}
+.md h1 { font-size: 20px; }
+.md h2 { font-size: 17px; }
+.md h3 { font-size: 15px; letter-spacing: 0.2px; }
+.md h4 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.8; }
+.md p { margin: 8px 0; }
+.md strong { color: var(--gold-bright, #dbbd84); font-weight: 700; }
+.md ul, .md ol { margin: 8px 0; padding-left: 20px; }
+.md li { margin: 3px 0; }
+.md a { color: var(--gold-bright, #dbbd84); text-decoration: underline; }
+.md code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 5px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+}
+.md pre {
+  background: rgba(0, 0, 0, 0.32);
+  padding: 10px 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+}
+.md blockquote {
+  border-left: 2px solid var(--gold-dim, #8a7545);
+  margin: 8px 0;
+  padding: 2px 0 2px 12px;
+  opacity: 0.85;
+}
+.md table {
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 12.5px;
+  width: 100%;
+  table-layout: fixed;
+}
+.md th, .md td {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 7px 9px;
+  text-align: left;
+  white-space: normal;
+  word-break: break-word;
+  vertical-align: top;
+}
+.md thead th {
+  background: rgba(200, 169, 110, 0.14);
+  font-weight: 600;
+  color: var(--gold-bright, #dbbd84);
+}
+.md tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.025); }
+.md hr { border: none; border-top: 1px solid rgba(255, 255, 255, 0.1); margin: 14px 0; }

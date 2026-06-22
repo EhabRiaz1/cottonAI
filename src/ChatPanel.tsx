@@ -29,6 +29,7 @@ type ChatPanelProps = {
   currentChat: Chat | null;
   activeSheet: OrgSheet | null;
   hasDocuments?: boolean;
+  hasOffers?: boolean;
   onChatCreated: (chatId: string) => void;
   onMessagesUpdated: () => void;
 };
@@ -42,11 +43,14 @@ export function ChatPanel({
   currentChat,
   activeSheet,
   hasDocuments = false,
+  hasOffers = false,
   onChatCreated,
   onMessagesUpdated,
 }: ChatPanelProps) {
   const sheetReady = !!activeSheet && activeSheet.parse_status === "ready";
-  const canChat = sheetReady || hasDocuments;
+  // Offers are a global pool, so the assistant can answer from them even when this
+  // org has no sheet/docs uploaded (plan §10.4).
+  const canChat = sheetReady || hasDocuments || hasOffers;
 
   const streamBufferRef = useRef<string>("");
   const rafIdRef = useRef<number | null>(null);

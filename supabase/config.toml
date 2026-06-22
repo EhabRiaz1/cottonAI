@@ -5,3 +5,14 @@ verify_jwt = true
 
 [functions.chat]
 verify_jwt = true
+
+# Triggered by the scheduler with MAILBOX_SYNC_SECRET (no JWT) or an admin JWT;
+# the function does its own authorization, so JWT verification is disabled here.
+[functions.mailbox_sync]
+verify_jwt = false
+
+[functions.extract_offers]
+verify_jwt = false
+
+[functions.mailbox_chat]
+verify_jwt = true

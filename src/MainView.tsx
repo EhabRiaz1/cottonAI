@@ -3,12 +3,13 @@ import type { User } from "@supabase/supabase-js";
 import { supabase } from "./lib/supabase";
 import type { Org, OrgMember, Chat, OrgSheet } from "./lib/types";
 import { DashboardView } from "./DashboardView";
+import { MailboxView } from "./MailboxView";
 import { SignalsView } from "./SignalsView";
 import { PlatformAdminPortal } from "./PlatformAdminPortal";
 import { ChatPanel } from "./ChatPanel";
 import { PageLoader } from "./PageLoader";
 
-type View = "dashboard" | "chat" | "signals" | "admin_portal";
+type View = "dashboard" | "chat" | "offers" | "signals" | "admin_portal";
 
 type Props = {
   user: User;
@@ -85,6 +86,7 @@ function MainView({
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [activeSheet, setActiveSheet] = useState<OrgSheet | null>(null);
   const [hasDocuments, setHasDocuments] = useState(false);
+  const [hasOffers, setHasOffers] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
     new Set(["Today", "Yesterday"])
   );
@@ -128,6 +130,12 @@ function MainView({
       .eq("org_id", contextOrgId)
       .eq("is_active", true);
     setHasDocuments((count ?? 0) > 0);
+
+    // Global offer pool — enables chat even when this org has no sheet/docs.
+    const { count: offerCount } = await supabase
+      .from("cotton_offers")
+      .select("id", { count: "exact", head: true });
+    setHasOffers((offerCount ?? 0) > 0);
   }, [contextOrgId]);
 
   useEffect(() => {
@@ -287,6 +295,14 @@ function MainView({
 
           <button
             type="button"
+            className={`sidebar-link${view === "offers" ? " active" : ""}`}
+            onClick={() => navigateTo("offers")}
+          >
+            Cotton Mailbox
+          </button>
+
+          <button
+            type="button"
             className={`sidebar-link${view === "signals" ? " active" : ""}`}
             onClick={() => navigateTo("signals")}
           >
@@ -374,12 +390,19 @@ function MainView({
           currentChat={currentChat}
           activeSheet={activeSheet}
           hasDocuments={hasDocuments}
+          hasOffers={hasOffers}
           onChatCreated={(id) => {
             setCurrentChatId(id);
             void loadChats();
           }}
           onMessagesUpdated={() => void loadChats()}
         />
+      )}
+
+      {view === "offers" && (
+        <main className="app-main" style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <MailboxView isPlatformAdmin={isPlatformAdmin} userName={orgDisplayName} />
+        </main>
       )}
 
       {view === "signals" && (
