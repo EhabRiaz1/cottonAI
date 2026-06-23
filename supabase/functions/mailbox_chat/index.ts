@@ -14,8 +14,8 @@ import { OFFER_TOOLS, runOfferTool } from "../_shared/offer_tools.ts";
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_ROUNDS = 6;
-const MAX_FOCUS_ATTACH = 6;
-const MAX_FOCUS_BYTES = 18_000_000;
+const MAX_FOCUS_ATTACH = 12;
+const MAX_FOCUS_BYTES = 26_000_000;
 
 const MAILBOX_TOOLS = [
   ...OFFER_TOOLS,
@@ -29,6 +29,20 @@ const MAILBOX_TOOLS = [
       type: "object",
       properties: { attachment_id: { type: "string" } },
       required: ["attachment_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "get_email",
+    description:
+      "Find an email by sender (name or address) or subject keywords and return ALL " +
+      "of its attachments plus every offer and recap extracted from them. Use this " +
+      "when the user asks about a specific email, sender, or broker, so you consider " +
+      "the WHOLE email and ALL its documents, not just one.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "Sender name/email or subject keywords" } },
+      required: ["query"],
       additionalProperties: false,
     },
   },
@@ -62,8 +76,10 @@ Deno.serve(async (req: Request) => {
   if (!user) return j({ error: "Unauthorized" }, 401);
 
   type Msg = { role: "user" | "assistant"; content: string };
-  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global" } = {};
+  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; timelineLabel?: string } = {};
   try { body = await req.json(); } catch { return j({ error: "Invalid JSON" }, 400); }
+  const dateFrom = typeof body.dateFrom === "string" && body.dateFrom ? body.dateFrom : null;
+  const timelineLabel = body.timelineLabel || (dateFrom ? `since ${dateFrom}` : "entire mailbox");
   const clientMessages = (body.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant");
   if (!clientMessages.length) return j({ error: "messages required" }, 400);
   const scope = body.scope === "email" && body.emailId ? "email" : "global";
@@ -140,7 +156,10 @@ Deno.serve(async (req: Request) => {
 
   for (const m of clientMessages) messages.push({ role: m.role, content: m.content });
 
-  const systemText = `${BASE_PROMPT}${refContext ? `\n\n## Cotton Reference (authoritative field meanings):${refContext}` : ""}${focusNote}${GUIDANCE(scope)}`;
+  const timelineNote = scope === "email" ? "" : (dateFrom
+    ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nONLY consider offers dated on or after ${dateFrom}. Pass date_from:"${dateFrom}" to search_offers and search the FULL range EXHAUSTIVELY with a high limit (e.g. 300). Do NOT base a broad answer on a single document or only the most recent offers.`
+    : `\n\n## Timeline scope (user-selected: entire mailbox)\nSearch comprehensively across ALL brokers and dates — call search_offers with a high limit (e.g. 400) and review the whole pool. Do NOT answer a broad question from a single document or only the most recent offers.`);
+  const systemText = `${BASE_PROMPT}${refContext ? `\n\n## Cotton Reference (authoritative field meanings):${refContext}` : ""}${focusNote}${timelineNote}${GUIDANCE(scope)}`;
   const nowMs = Date.now();
 
   // NDJSON event stream: {t:"act"} live tool activity (which docs it's viewing),
@@ -183,6 +202,14 @@ Deno.serve(async (req: Request) => {
                 const cards = await resolveSources(supabase, b.input?.attachment_id ? [b.input.attachment_id] : [], []);
                 emit({ t: "act", label: cards[0]?.filename ? `Reading ${cards[0].filename}` : "Reading attachment", cards });
                 out = await readAttachment(supabase, admin, apiKey, model, b.input?.attachment_id);
+              } else if (b.name === "get_email") {
+                out = await runGetEmail(supabase, b.input?.query ?? "");
+                const m = (out as { matches?: { email: { id: string }; attachments: { id: string }[] }[] }).matches ?? [];
+                const attIds: string[] = []; const emIds: string[] = [];
+                for (const x of m) { emIds.push(x.email.id); for (const a of x.attachments) attIds.push(a.id); }
+                attIds.forEach((id) => srcAtt.add(id)); emIds.forEach((id) => srcEmail.add(id));
+                const cards = await resolveSources(supabase, attIds, emIds);
+                emit({ t: "act", label: "Opening email", cards });
               } else {
                 out = await runOfferTool(supabase, b.name, b.input ?? {}, nowMs);
                 noteOffers(out);
@@ -252,6 +279,33 @@ async function resolveSources(db: SupabaseClient, attIds: string[], emailIds: st
     for (const e of ems ?? []) cards.push({ type: "email", emailId: e.id, subject: e.subject ?? null, broker: e.broker_guess ?? null });
   }
   return cards.slice(0, 10);
+}
+
+// Find an email by sender/subject and return ALL its attachments + extracted
+// offers/recaps, so the agent considers the whole email at once.
+async function runGetEmail(db: SupabaseClient, query: string): Promise<unknown> {
+  const q = `%${query.replace(/[%,()]/g, " ").trim()}%`;
+  const { data: emails } = await db.from("email_messages")
+    .select("id, from_name, from_address, broker_guess, subject, date_sent")
+    .or(`from_name.ilike.${q},from_address.ilike.${q},subject.ilike.${q},broker_guess.ilike.${q}`)
+    .order("date_sent", { ascending: false, nullsFirst: false }).limit(3);
+  // deno-lint-ignore no-explicit-any
+  const matches: any[] = [];
+  for (const e of emails ?? []) {
+    const { data: atts } = await db.from("email_attachments")
+      .select("id, filename, kind").eq("email_id", e.id);
+    const { data: offers } = await db.from("cotton_offers")
+      .select("broker,origin_country,grade_raw,mic,staple_fraction,staple_32nds,gpt,quantity_bales,price_type,price_basis_points,price_outright_cents,futures_month,crop_year,offer_date,needs_review,source_attachment_id")
+      .eq("source_email_id", e.id).limit(300);
+    const { data: recaps } = await db.from("cotton_recaps")
+      .select("recap_code,broker,crop_year,total_bales,avg_mic,avg_staple,avg_gpt,avg_length,avg_uniformity,source_attachment_id")
+      .eq("source_email_id", e.id).limit(80);
+    matches.push({
+      email: { id: e.id, from: e.from_name ?? e.from_address, broker: e.broker_guess, subject: e.subject, date: e.date_sent },
+      attachments: atts ?? [], offers: offers ?? [], recaps: recaps ?? [],
+    });
+  }
+  return { matches };
 }
 
 // Read one attachment's content. Excel -> text locally; PDF -> a focused model
@@ -328,6 +382,10 @@ function GUIDANCE(scope: "email" | "global"): string {
 - Use \`search_offers\` to find/compare offers across the whole mailbox; \`get_recap\` for a lot's
   deep quality distribution; \`read_attachment\` to open a specific PDF/Excel when you need detail
   beyond the structured fields; \`web_search\` for current public market context.
+- When the user asks about a SPECIFIC email, sender, or broker, call \`get_email\` — it returns the
+  email and ALL of its attachments and extracted offers at once. Consider EVERY attachment it
+  returns, not just the first; if you need the raw text of a specific one, follow up with
+  \`read_attachment\`. Never answer about an email after looking at only one of its documents.
 - ${scope === "email"
     ? "You are focused on ONE email whose attachments are provided above — answer primarily from them, but you may search the wider pool if asked."
     : "You are in whole-mailbox mode — search across all offers and brokers."}

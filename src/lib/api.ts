@@ -160,6 +160,8 @@ export async function streamMailboxChat(
     messages: { role: "user" | "assistant"; content: string }[];
     emailId?: string | null;
     scope?: "email" | "global";
+    dateFrom?: string | null;
+    timelineLabel?: string;
   },
   onEvent: (ev: MailboxEvent) => void,
 ): Promise<void> {

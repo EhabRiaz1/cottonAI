@@ -52,12 +52,20 @@ const fmtSize = (b: number | null) => b == null ? "" : b > 1e6 ? `${(b / 1e6).to
 const fmtDate = (d: string | null) => d ? new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
 function timeOfDay() { const h = new Date().getHours(); return h < 12 ? "morning" : h < 18 ? "afternoon" : "evening"; }
 
+const SCOPE_OPTIONS: { label: string; days: number | null }[] = [
+  { label: "Last 7 days", days: 7 },
+  { label: "Last 30 days", days: 30 },
+  { label: "Last 90 days", days: 90 },
+  { label: "Entire mailbox", days: null },
+];
+
 export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: boolean; userName?: string }) {
   const [mode, setMode] = useState<"inbox" | "offers">("inbox");
   const [emails, setEmails] = useState<Email[]>([]);
   const [attCounts, setAttCounts] = useState<Record<string, number>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attLoading, setAttLoading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewName, setPreviewName] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -70,6 +78,16 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
   const [wholeMailbox, setWholeMailbox] = useState(false);
   const [chatErr, setChatErr] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Timeline scope — asked as a multiple-choice question before the first answer.
+  const [timeline, setTimeline] = useState<{ label: string; dateFrom: string | null } | null>(null);
+  const [pendingMessages, setPendingMessages] = useState<ChatMsg[] | null>(null);
+
+  // Saved conversation history.
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const currentChatIdRef = useRef<string | null>(null);
+  const [history, setHistory] = useState<{ id: string; title: string | null; updated_at: string }[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   // Live inspector pane — which documents the agent is viewing / used.
   const [inspectorOpen, setInspectorOpen] = useState(false);
@@ -106,12 +124,15 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
 
   const selectEmail = useCallback(async (id: string) => {
     // Keep the conversation — opening an email only changes context, never wipes chat.
-    setSelectedId(id); setPreviewUrl(null);
+    // Clear stale attachments immediately + show a loader so the previous email's
+    // content never lingers under the new selection.
+    setSelectedId(id); setPreviewUrl(null); setAttachments([]); setAttLoading(true);
     const { data } = await supabase
       .from("email_attachments")
       .select("id, filename, mime_type, kind, size_bytes, storage_path")
       .eq("email_id", id).order("kind").order("filename");
     setAttachments((data as Attachment[] | null) ?? []);
+    setAttLoading(false);
   }, []);
 
   const clearSelection = useCallback(() => {
@@ -160,12 +181,47 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
     } finally { setSyncing(false); }
   }, [loadEmails, loadStatus]);
 
-  const send = useCallback(async () => {
-    const text = input.trim();
-    if (!text || sending) return;
-    setInput(""); setChatErr(null);
-    const next = [...messages, { role: "user" as const, content: text }];
-    setMessages(next); setSending(true); setPreview("");
+  const loadHistory = useCallback(async () => {
+    const { data } = await supabase
+      .from("mailbox_chats").select("id, title, updated_at")
+      .order("updated_at", { ascending: false }).limit(60);
+    setHistory((data as { id: string; title: string | null; updated_at: string }[] | null) ?? []);
+  }, []);
+
+  const persistChat = useCallback(async (allMsgs: ChatMsg[]) => {
+    const { data: { user } } = await supabase.auth.getUser();
+    const uid = user?.id; if (!uid) return;
+    const title = (allMsgs.find((m) => m.role === "user")?.content ?? "Mailbox chat").slice(0, 70);
+    if (currentChatIdRef.current) {
+      await supabase.from("mailbox_chats")
+        .update({ title, messages: allMsgs }).eq("id", currentChatIdRef.current);
+    } else {
+      const { data } = await supabase.from("mailbox_chats")
+        .insert({ user_id: uid, title, messages: allMsgs, email_id: selectedId }).select("id").single();
+      if (data?.id) { currentChatIdRef.current = data.id; setCurrentChatId(data.id); }
+    }
+    void loadHistory();
+  }, [selectedId, loadHistory]);
+
+  const newChat = useCallback(() => {
+    setMessages([]); setPreview(""); setChatErr(null);
+    setTimeline(null); setPendingMessages(null);
+    setInspectorOpen(false); setInspectorCards([]); setInspectorLabel(null);
+    currentChatIdRef.current = null; setCurrentChatId(null); setHistoryOpen(false);
+  }, []);
+
+  const loadChat = useCallback(async (id: string) => {
+    const { data } = await supabase.from("mailbox_chats").select("messages, email_id").eq("id", id).single();
+    if (data) {
+      setMessages((data.messages as ChatMsg[]) ?? []);
+      currentChatIdRef.current = id; setCurrentChatId(id);
+      setPreview(""); setPendingMessages(null); setInspectorOpen(false);
+    }
+    setHistoryOpen(false);
+  }, []);
+
+  const runAgent = useCallback(async (msgs: ChatMsg[], tl: { label: string; dateFrom: string | null }) => {
+    setSending(true); setPreview(""); setChatErr(null);
     setInspectorOpen(true); setInspectorLabel(null); setInspectorCards([]);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -173,7 +229,7 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
       const scope = selectedId && !wholeMailbox ? "email" : "global";
       let acc = "";
       let finalSources: SourceCard[] = [];
-      await streamMailboxChat(token, { messages: next, emailId: selectedId, scope }, (ev: MailboxEvent) => {
+      await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, timelineLabel: tl.label }, (ev: MailboxEvent) => {
         if (ev.t === "tok") { acc += ev.v; setPreview(acc); }
         else if (ev.t === "act") {
           if (ev.label) setInspectorLabel(ev.label);
@@ -185,12 +241,33 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
           setChatErr(ev.m);
         }
       });
-      setMessages([...next, { role: "assistant", content: acc.trim(), sources: finalSources }]);
+      const finalMsgs = [...msgs, { role: "assistant" as const, content: acc.trim(), sources: finalSources }];
+      setMessages(finalMsgs);
       setPreview(""); setInspectorLabel(null);
+      void persistChat(finalMsgs);
     } catch (e) {
       setChatErr(e instanceof Error ? e.message : String(e));
     } finally { setSending(false); }
-  }, [input, sending, messages, selectedId, wholeMailbox]);
+  }, [selectedId, wholeMailbox, persistChat]);
+
+  const send = useCallback(() => {
+    const text = input.trim();
+    if (!text || sending || pendingMessages) return;
+    setInput("");
+    const next = [...messages, { role: "user" as const, content: text }];
+    setMessages(next);
+    // First prompt of a thread → ask the timeline as a multiple-choice question.
+    if (!timeline) setPendingMessages(next);
+    else void runAgent(next, timeline);
+  }, [input, sending, messages, timeline, pendingMessages, runAgent]);
+
+  const chooseScope = useCallback((label: string, days: number | null) => {
+    const dateFrom = days == null ? null : new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
+    const tl = { label, dateFrom };
+    setTimeline(tl);
+    const pend = pendingMessages; setPendingMessages(null);
+    if (pend) void runAgent(pend, tl);
+  }, [pendingMessages, runAgent]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, preview]);
 
@@ -292,7 +369,12 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
                   }}>✕</button>
               </div>
               <div style={{ marginTop: 14, fontSize: 12, textTransform: "uppercase", letterSpacing: 0.5, opacity: 0.55 }}>Attachments</div>
-              {attachments.length === 0 && <p style={{ opacity: 0.5, fontSize: 13 }}>No PDF/Excel attachments.</p>}
+              {attLoading && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 2px", opacity: 0.78, fontSize: 13 }}>
+                  <span className="mini-spinner" /> Loading attachments…
+                </div>
+              )}
+              {!attLoading && attachments.length === 0 && <p style={{ opacity: 0.5, fontSize: 13 }}>No PDF/Excel attachments.</p>}
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                 {attachments.map((a) => (
                   <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 8, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)" }}>
@@ -320,6 +402,24 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
                 whole mailbox
               </label>
             )}
+            <button onClick={newChat} title="New chat" style={hdrBtn}>+ New</button>
+            <div style={{ position: "relative" }}>
+              <button onClick={() => { setHistoryOpen((o) => !o); if (!historyOpen) void loadHistory(); }} title="Chat history" style={hdrBtn}>History</button>
+              {historyOpen && (
+                <div style={{ position: "absolute", right: 0, top: "130%", width: 270, maxHeight: 360, overflowY: "auto", background: "#16161a", border: "1px solid rgba(255,255,255,0.14)", borderRadius: 12, boxShadow: "0 18px 44px rgba(0,0,0,0.5)", zIndex: 60, padding: 6 }}>
+                  {history.length === 0 && <p style={{ opacity: 0.5, fontSize: 12, padding: 10 }}>No saved chats yet.</p>}
+                  {history.map((h) => (
+                    <button key={h.id} onClick={() => void loadChat(h.id)} style={{
+                      display: "block", width: "100%", textAlign: "left", padding: "8px 10px", borderRadius: 8, border: "none", cursor: "pointer",
+                      background: h.id === currentChatId ? "rgba(200,169,110,0.14)" : "transparent", color: "inherit",
+                    }}>
+                      <span style={{ display: "block", fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.title || "Untitled"}</span>
+                      <span style={{ display: "block", fontSize: 10.5, opacity: 0.5 }}>{new Date(h.updated_at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
           <div style={{
             flex: 1, overflowY: "auto", padding: 14, display: "flex", flexDirection: "column",
@@ -369,6 +469,21 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
                 )}
               </div>
             ))}
+            {pendingMessages && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
+                <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
+                <div style={aiBubble}>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 10 }}>How far back should I look?</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {SCOPE_OPTIONS.map((o) => (
+                      <button key={o.label} className="scope-option" onClick={() => chooseScope(o.label, o.days)}>
+                        {o.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
             {preview && (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
                 <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
@@ -383,13 +498,23 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
             {chatErr && <p style={{ color: RED, fontSize: 12 }}>{chatErr}</p>}
             <div ref={endRef} />
           </div>
-          <div style={{ padding: 12, borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", gap: 8 }}>
-            <textarea value={input} onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void send(); } }}
-              placeholder="Message the mailbox…" rows={2}
-              style={{ ...inp, resize: "none", flex: 1 }} disabled={sending} />
-            <button onClick={() => void send()} disabled={sending || !input.trim()} className="btn btn-primary"
-              style={{ alignSelf: "stretch" }}>Send</button>
+          <div style={{ padding: 12, borderTop: "1px solid rgba(255,255,255,0.07)", display: "flex", flexDirection: "column", gap: 8 }}>
+            {timeline && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11 }}>
+                <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 20, background: "rgba(200,169,110,0.12)", border: "1px solid rgba(200,169,110,0.28)" }}>
+                  🕑 {timeline.label}
+                </span>
+                <button onClick={() => setTimeline(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", textDecoration: "underline", opacity: 0.65, fontSize: 11 }}>change</button>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <textarea value={input} onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+                placeholder={pendingMessages ? "Pick a timeline above…" : "Message the mailbox…"} rows={2}
+                style={{ ...inp, resize: "none", flex: 1 }} disabled={sending || !!pendingMessages} />
+              <button onClick={() => send()} disabled={sending || !!pendingMessages || !input.trim()} className="btn btn-primary"
+                style={{ alignSelf: "stretch" }}>Send</button>
+            </div>
           </div>
         </div>
 
@@ -520,6 +645,11 @@ const userBubble: React.CSSProperties = {
   maxWidth: "86%", background: "rgba(200,169,110,0.16)", border: "1px solid rgba(200,169,110,0.30)",
   borderRadius: "14px 14px 4px 14px", padding: "9px 14px", fontSize: 15, lineHeight: 1.55,
   whiteSpace: "pre-wrap", textAlign: "left",
+};
+
+const hdrBtn: React.CSSProperties = {
+  fontSize: 11.5, padding: "4px 10px", borderRadius: 7, cursor: "pointer",
+  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", color: "inherit",
 };
 
 const inp: React.CSSProperties = {

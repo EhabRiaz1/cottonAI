@@ -72,7 +72,7 @@ const OFFER_COLS =
 type Filters = Record<string, any>;
 
 export async function runSearchOffers(db: SupabaseClient, f: Filters, nowMs: number) {
-  const limit = Math.min(Number(f.limit) || 50, 200);
+  const limit = Math.min(Number(f.limit) || 100, 500);
   let q = db.from("cotton_offers").select(OFFER_COLS);
 
   if (f.origin_country) q = q.ilike("origin_country", `%${f.origin_country}%`);

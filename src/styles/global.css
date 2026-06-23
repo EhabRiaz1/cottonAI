@@ -3449,6 +3449,39 @@ body::after {
   color: var(--gold-bright, #dbbd84);
   letter-spacing: 0.2px;
 }
+/* Claude.ai-style multiple-choice option buttons (timeline scope question). */
+.scope-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 13px;
+  border-radius: 10px;
+  font-size: 13.5px;
+  color: inherit;
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+.scope-option:hover {
+  background: rgba(200, 169, 110, 0.14);
+  border-color: rgba(200, 169, 110, 0.45);
+  transform: translateY(-1px);
+}
+
+/* Small inline spinner (e.g. while an email's attachments load). */
+@keyframes cottonSpin { to { transform: rotate(360deg); } }
+.mini-spinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  border: 2px solid rgba(200, 169, 110, 0.25);
+  border-top-color: var(--gold-bright, #dbbd84);
+  border-radius: 50%;
+  animation: cottonSpin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+
 .thinking-badge .dot {
   width: 9px;
   height: 9px;
