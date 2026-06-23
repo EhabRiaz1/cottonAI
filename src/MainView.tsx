@@ -223,8 +223,25 @@ function MainView({
               type="button"
               className={`sidebar-link sidebar-link-main${view === "chat" ? " active" : ""}`}
               onClick={() => navigateTo("chat")}
+              style={{ display: "flex", alignItems: "center", gap: 8 }}
             >
-              AI Chat
+              <span>AI Chat</span>
+              <span
+                style={{
+                  fontSize: 9.5,
+                  fontWeight: 700,
+                  letterSpacing: 0.4,
+                  textTransform: "uppercase",
+                  color: "#fff",
+                  background: "#e23b3b",
+                  border: "1px solid rgba(255,255,255,0.18)",
+                  borderRadius: 5,
+                  padding: "1px 6px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Do not use
+              </span>
             </button>
             {view === "chat" && (
               <button
