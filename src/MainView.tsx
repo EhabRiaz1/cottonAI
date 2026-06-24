@@ -57,6 +57,13 @@ function groupChatsByDate(chats: Chat[]): ChatGroup[] {
 
 const dots = ["dot-green", "dot-amber", "dot-blue"] as const;
 
+// Red notification circle (open support count).
+const countBadge: React.CSSProperties = {
+  minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9,
+  background: "#e23b3b", color: "#fff", fontSize: 11, fontWeight: 700,
+  display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 1,
+};
+
 function MainView({
   user,
   org,
@@ -88,9 +95,24 @@ function MainView({
   const [activeSheet, setActiveSheet] = useState<OrgSheet | null>(null);
   const [hasDocuments, setHasDocuments] = useState(false);
   const [hasOffers, setHasOffers] = useState(false);
+  const [openSupport, setOpenSupport] = useState(0);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(
     new Set(["Today", "Yesterday"])
   );
+
+  // Live count of open support requests (admins only) → sidebar badge.
+  useEffect(() => {
+    if (!isPlatformAdmin) return;
+    let active = true;
+    const fetchCount = async () => {
+      const { count } = await supabase
+        .from("support_requests").select("id", { count: "exact", head: true }).eq("status", "open");
+      if (active) setOpenSupport(count ?? 0);
+    };
+    void fetchCount();
+    const t = window.setInterval(fetchCount, 30000);
+    return () => { active = false; window.clearInterval(t); };
+  }, [isPlatformAdmin, view]);
 
   const refreshOrgs = useCallback(async () => {
     onProfileChanged();
@@ -346,8 +368,12 @@ function MainView({
                 view === "admin_portal" ? " active" : ""
               }`}
               onClick={() => navigateTo("admin_portal")}
+              style={{ display: "flex", alignItems: "center", gap: 8 }}
             >
-              Admin
+              <span>Admin</span>
+              {openSupport > 0 && (
+                <span style={countBadge} title={`${openSupport} open support request(s)`}>{openSupport}</span>
+              )}
             </button>
           )}
         </div>

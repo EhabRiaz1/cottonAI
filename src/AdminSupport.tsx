@@ -16,7 +16,7 @@ const STATUSES = ["open", "in_progress", "resolved"] as const;
 const statusColor = (s: string) => s === "open" ? "#f5a623" : s === "in_progress" ? "#5b9bff" : "#2ecc71";
 const fmt = (d: string) => new Date(d).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
-export function AdminSupport() {
+export function AdminSupport({ onChange }: { onChange?: () => void }) {
   const [reqs, setReqs] = useState<Req[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Req | null>(null);
@@ -54,7 +54,8 @@ export function AdminSupport() {
     setSaving(false);
     setSelected({ ...selected, status, admin_notes: notes });
     void load();
-  }, [selected, notes, load]);
+    onChange?.();
+  }, [selected, notes, load, onChange]);
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, minHeight: 480 }}>

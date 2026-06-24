@@ -27,6 +27,13 @@ function generatePassword(length = 12): string {
 
 export function PlatformAdminPortal({ user: _user, allOrgs, onOrgsChange }: Props) {
   const [tab, setTab] = useState<Tab>("overview");
+  const [openSupport, setOpenSupport] = useState(0);
+  const refreshSupportCount = useCallback(async () => {
+    const { count } = await supabase
+      .from("support_requests").select("id", { count: "exact", head: true }).eq("status", "open");
+    setOpenSupport(count ?? 0);
+  }, []);
+  useEffect(() => { void refreshSupportCount(); }, [refreshSupportCount, tab]);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [notes, setNotes] = useState("");
@@ -460,8 +467,12 @@ export function PlatformAdminPortal({ user: _user, allOrgs, onOrgsChange }: Prop
         <button type="button" className={tab === "chats" ? "active" : ""} onClick={() => setTab("chats")}>
           Mailbox Chats
         </button>
-        <button type="button" className={tab === "support" ? "active" : ""} onClick={() => setTab("support")}>
+        <button type="button" className={tab === "support" ? "active" : ""} onClick={() => setTab("support")}
+          style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
           Support
+          {openSupport > 0 && (
+            <span style={{ minWidth: 18, height: 18, padding: "0 5px", borderRadius: 9, background: "#e23b3b", color: "#fff", fontSize: 11, fontWeight: 700, display: "inline-flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }} title={`${openSupport} open`}>{openSupport}</span>
+          )}
         </button>
         <button type="button" className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
           + Create Account
@@ -469,7 +480,7 @@ export function PlatformAdminPortal({ user: _user, allOrgs, onOrgsChange }: Prop
       </div>
 
       {tab === "chats" && <AdminMailboxChats />}
-      {tab === "support" && <AdminSupport />}
+      {tab === "support" && <AdminSupport onChange={refreshSupportCount} />}
 
       {tab === "overview" && (
         <div className="admin-overview">
