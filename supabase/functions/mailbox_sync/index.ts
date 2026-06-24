@@ -55,17 +55,15 @@ Deno.serve(async (req: Request) => {
   if (syncSecret && presentedSecret && presentedSecret === syncSecret) {
     authorized = true;
   } else {
+    // Any authenticated user can sync — the mailbox is a shared global pool, so a
+    // sync just refreshes data everyone sees. (Scheduler uses x-sync-secret above.)
     const authHeader = req.headers.get("Authorization");
     if (authHeader) {
       const userClient = createClient(supabaseUrl, anonKey, {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: { user } } = await userClient.auth.getUser();
-      if (user) {
-        const { data: pa } = await userClient
-          .from("platform_admins").select("user_id").eq("user_id", user.id).maybeSingle();
-        if (pa) authorized = true;
-      }
+      if (user) authorized = true;
     }
   }
   if (!authorized) return json({ error: "Unauthorized" }, 401);

@@ -36,7 +36,7 @@ Deno.serve(async (req: Request) => {
 
   if (!apiKey) return json({ error: "ANTHROPIC_API_KEY not configured" }, 500);
 
-  // Authorize: shared sync secret (scheduler) or a platform-admin JWT.
+  // Authorize: shared sync secret (scheduler) or any authenticated user (shared pool).
   const presentedSecret = req.headers.get("x-sync-secret");
   let authorized = !!syncSecret && presentedSecret === syncSecret;
   if (!authorized) {
@@ -46,11 +46,7 @@ Deno.serve(async (req: Request) => {
         global: { headers: { Authorization: authHeader } },
       });
       const { data: { user } } = await userClient.auth.getUser();
-      if (user) {
-        const { data: pa } = await userClient
-          .from("platform_admins").select("user_id").eq("user_id", user.id).maybeSingle();
-        if (pa) authorized = true;
-      }
+      if (user) authorized = true;
     }
   }
   if (!authorized) return json({ error: "Unauthorized" }, 401);

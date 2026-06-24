@@ -81,6 +81,7 @@ function priceSortVal(o: CottonOffer): number {
 }
 
 export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
+  void isPlatformAdmin; // sync + status now available to everyone (shared mailbox)
   const [offers, setOffers] = useState<CottonOffer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -102,7 +103,6 @@ export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
   const [checkingConn, setCheckingConn] = useState(false);
 
   const checkConnection = useCallback(async () => {
-    if (!isPlatformAdmin) return;
     setCheckingConn(true);
     try {
       const { data: { session } } = await supabase.auth.getSession();
@@ -114,7 +114,7 @@ export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
     } finally {
       setCheckingConn(false);
     }
-  }, [isPlatformAdmin]);
+  }, []);
 
   const loadStatus = useCallback(async () => {
     const { data: runs } = await supabase
@@ -226,8 +226,8 @@ export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
         border: "1px solid rgba(255,255,255,0.08)", marginBottom: 16,
       }}>
         {(() => {
-          // Admin: explicit verified connection badge. Others: sync health.
-          if (isPlatformAdmin && (conn || checkingConn)) {
+          // Verified connection badge (available to everyone — shared mailbox).
+          if (conn || checkingConn) {
             const ok = conn?.connected;
             const mismatch = conn?.mailboxMismatch;
             const color = checkingConn ? GREY : ok ? (mismatch ? AMBER : GREEN) : RED;
@@ -266,11 +266,9 @@ export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
         )}
         <div style={{ flex: 1 }} />
         {syncMsg && <span style={{ fontSize: 12, opacity: 0.8 }}>{syncMsg}</span>}
-        {isPlatformAdmin && (
-          <button type="button" className="btn btn-ghost" onClick={() => void runSync()} disabled={syncing}>
-            {syncing ? "Syncing…" : "Sync now"}
-          </button>
-        )}
+        <button type="button" className="btn btn-ghost" onClick={() => void runSync()} disabled={syncing}>
+          {syncing ? "Syncing…" : "Sync now"}
+        </button>
       </div>
 
       {/* Filters */}
@@ -300,7 +298,7 @@ export function OffersView({ isPlatformAdmin }: { isPlatformAdmin: boolean }) {
       {error && <p style={{ color: RED }}>{error}</p>}
       {!loading && !error && filtered.length === 0 && (
         <p style={{ opacity: 0.6 }}>
-          No offers yet. {isPlatformAdmin ? "Connect the mailbox and run Sync." : "Ask an admin to sync the mailbox."}
+          No offers yet. Hit “Sync now” to fetch from the mailbox.
         </p>
       )}
 

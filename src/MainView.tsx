@@ -5,11 +5,12 @@ import type { Org, OrgMember, Chat, OrgSheet } from "./lib/types";
 import { DashboardView } from "./DashboardView";
 import { MailboxView } from "./MailboxView";
 import { SignalsView } from "./SignalsView";
+import { SupportView } from "./SupportView";
 import { PlatformAdminPortal } from "./PlatformAdminPortal";
 import { ChatPanel } from "./ChatPanel";
 import { PageLoader } from "./PageLoader";
 
-type View = "dashboard" | "chat" | "offers" | "signals" | "admin_portal";
+type View = "dashboard" | "chat" | "offers" | "signals" | "support" | "admin_portal";
 
 type Props = {
   user: User;
@@ -187,8 +188,10 @@ function MainView({
     [allOrgs, contextOrgId, org]
   );
   const orgDisplayName = activeOrg?.name ?? "User";
+  // Platform admins see "Admin" (bottom-left + welcome screens), not the org context name.
+  const displayName = isPlatformAdmin ? "Admin" : orgDisplayName;
   const initials =
-    orgDisplayName
+    displayName
       .split(/\s+/)
       .map((n) => n[0])
       .filter(Boolean)
@@ -329,6 +332,13 @@ function MainView({
               Coming soon
             </span>
           </button>
+          <button
+            type="button"
+            className={`sidebar-link${view === "support" ? " active" : ""}`}
+            onClick={() => navigateTo("support")}
+          >
+            Support
+          </button>
           {showAdminNav && (
             <button
               type="button"
@@ -365,7 +375,7 @@ function MainView({
           <div className="sidebar-user">
             <div className="sidebar-avatar">{initials}</div>
             <div className="sidebar-user-info">
-              <span className="sidebar-user-name">{orgDisplayName}</span>
+              <span className="sidebar-user-name">{displayName}</span>
               {isPlatformAdmin && (
                 <span className="sidebar-user-badge">Admin</span>
               )}
@@ -401,7 +411,7 @@ function MainView({
         <ChatPanel
           user={user}
           orgId={contextOrgId ?? ""}
-          orgName={orgDisplayName}
+          orgName={displayName}
           isPlatformAdmin={isPlatformAdmin}
           currentChatId={currentChatId}
           currentChat={currentChat}
@@ -418,7 +428,17 @@ function MainView({
 
       {view === "offers" && (
         <main className="app-main" style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
-          <MailboxView isPlatformAdmin={isPlatformAdmin} userName={orgDisplayName} />
+          <MailboxView isPlatformAdmin={isPlatformAdmin} userName={displayName} orgId={contextOrgId} />
+        </main>
+      )}
+
+      {view === "support" && (
+        <main className="app-main" style={{ overflow: "auto" }}>
+          <div className="chat-header">
+            <div className="chat-title">Support</div>
+            <div className="chat-status"><span className="chat-status-dot" />We're here to help</div>
+          </div>
+          <SupportView userId={user.id} orgId={contextOrgId} />
         </main>
       )}
 

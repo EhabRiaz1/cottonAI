@@ -5,6 +5,8 @@ import type { Chat, Org, OrgSheet, MessageRow, OrgDocument, SystemPrompt } from 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import * as XLSX from "xlsx";
+import { AdminMailboxChats } from "./AdminMailboxChats";
+import { AdminSupport } from "./AdminSupport";
 
 type Props = {
   user: User;
@@ -12,7 +14,7 @@ type Props = {
   onOrgsChange: () => void;
 };
 
-type Tab = "overview" | "orgs" | "create" | "prompts";
+type Tab = "overview" | "orgs" | "create" | "prompts" | "chats" | "support";
 
 function generatePassword(length = 12): string {
   const chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%";
@@ -455,10 +457,19 @@ export function PlatformAdminPortal({ user: _user, allOrgs, onOrgsChange }: Prop
         <button type="button" className={tab === "prompts" ? "active" : ""} onClick={() => setTab("prompts")}>
           AI Prompts
         </button>
+        <button type="button" className={tab === "chats" ? "active" : ""} onClick={() => setTab("chats")}>
+          Mailbox Chats
+        </button>
+        <button type="button" className={tab === "support" ? "active" : ""} onClick={() => setTab("support")}>
+          Support
+        </button>
         <button type="button" className={tab === "create" ? "active" : ""} onClick={() => setTab("create")}>
           + Create Account
         </button>
       </div>
+
+      {tab === "chats" && <AdminMailboxChats />}
+      {tab === "support" && <AdminSupport />}
 
       {tab === "overview" && (
         <div className="admin-overview">

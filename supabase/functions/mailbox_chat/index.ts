@@ -46,6 +46,25 @@ const MAILBOX_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "make_file",
+    description:
+      "Generate a downloadable Excel (.xlsx) file from tabular data. Call this ONLY " +
+      "when the user explicitly asks to export / download / make a sheet or excel of " +
+      "information (e.g. 'make an excel of those offers'). `rows` is ROW-MAJOR: each row " +
+      "MUST have exactly columns.length cells, in the same order as `columns`. Prefer " +
+      "real values you already have from search_offers/get_email over re-typing.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "File / sheet title" },
+        columns: { type: "array", items: { type: "string" }, description: "Header row" },
+        rows: { type: "array", items: { type: "array", items: { type: "string" } }, description: "Row-major data; each row length === columns length" },
+      },
+      required: ["title", "columns", "rows"],
+      additionalProperties: false,
+    },
+  },
 ];
 const WEB_SEARCH_TOOL = { type: "web_search_20260209", name: "web_search" };
 
@@ -210,6 +229,11 @@ Deno.serve(async (req: Request) => {
                 attIds.forEach((id) => srcAtt.add(id)); emIds.forEach((id) => srcEmail.add(id));
                 const cards = await resolveSources(supabase, attIds, emIds);
                 emit({ t: "act", label: "Opening email", cards });
+              } else if (b.name === "make_file") {
+                emit({ t: "act", label: "Building Excel…" });
+                const r = await runMakeFile(admin, user.id, b.input ?? {});
+                out = r.toolResult;
+                if (r.artifact) emit({ t: "artifact", file: r.artifact });
               } else {
                 out = await runOfferTool(supabase, b.name, b.input ?? {}, nowMs);
                 noteOffers(out);
@@ -343,6 +367,44 @@ async function readAttachment(
     return { filename: a.filename, content: text.slice(0, 50_000) };
   }
   return { error: "unsupported attachment kind" };
+}
+
+// Generate an xlsx from agent-supplied tabular data, upload to the private
+// exports bucket (service role), and return an artifact descriptor (path, not URL).
+async function runMakeFile(
+  admin: SupabaseClient, userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const title = String(input?.title ?? "export");
+  const columns = Array.isArray(input?.columns) ? input.columns.map((c: unknown) => String(c ?? "")) : [];
+  const rows = Array.isArray(input?.rows) ? input.rows : [];
+  if (!columns.length) return { toolResult: { error: "columns is required (the header row)" } };
+  if (columns.length > 50) return { toolResult: { error: "too many columns (max 50)" } };
+  if (rows.length > 5000) return { toolResult: { error: "too many rows (max 5000) — filter the data first" } };
+  for (let i = 0; i < rows.length; i++) {
+    if (!Array.isArray(rows[i]) || rows[i].length !== columns.length) {
+      return { toolResult: { error: `row ${i + 1} has ${Array.isArray(rows[i]) ? rows[i].length : 0} cells but expected ${columns.length}; every row must match the columns exactly` } };
+    }
+  }
+  try {
+    // deno-lint-ignore no-explicit-any
+    const aoa = [columns, ...rows.map((r: any[]) => r.map((c) => (c == null ? "" : String(c))))];
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, (title.slice(0, 31) || "Sheet1"));
+    const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" }) as Uint8Array;
+    const safe = title.replace(/[^\w.\-]+/g, "_").slice(0, 60) || "export";
+    const name = `${safe}.xlsx`;
+    const path = `${userId}/${crypto.randomUUID()}_${name}`;
+    const { error } = await admin.storage.from("exports").upload(path, buf, {
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", upsert: true,
+    });
+    if (error) return { toolResult: { error: `upload failed: ${error.message}` } };
+    return { toolResult: { ok: true, filename: name, rows: rows.length }, artifact: { name, format: "xlsx", storagePath: path } };
+  } catch (e) {
+    return { toolResult: { error: `xlsx generation failed: ${e instanceof Error ? e.message : String(e)}` } };
+  }
 }
 
 function excelToText(bytes: Uint8Array): string {

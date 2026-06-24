@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import * as XLSX from "xlsx";
 import { supabase } from "./lib/supabase";
 import {
   getMailboxStatus,
+  type MailboxArtifact,
   type MailboxEvent,
   type MailboxStatus,
   streamMailboxChat,
@@ -33,7 +35,7 @@ type SourceCard = {
   attachmentId?: string; filename?: string; kind?: string; storagePath?: string | null;
   emailId?: string; subject?: string | null; broker?: string | null;
 };
-type ChatMsg = { role: "user" | "assistant"; content: string; sources?: SourceCard[] };
+type ChatMsg = { role: "user" | "assistant"; content: string; sources?: SourceCard[]; artifacts?: MailboxArtifact[] };
 
 function dedupeCards(cards: SourceCard[]): SourceCard[] {
   const seen = new Set<string>();
@@ -52,6 +54,15 @@ const fmtSize = (b: number | null) => b == null ? "" : b > 1e6 ? `${(b / 1e6).to
 const fmtDate = (d: string | null) => d ? new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—";
 function timeOfDay() { const h = new Date().getHours(); return h < 12 ? "morning" : h < 18 ? "afternoon" : "evening"; }
 
+// WhatsApp shares carry TEXT only (transcript / single answer). Files use the
+// OS share sheet via openArtifact. wa.me text is capped to stay under the URL budget.
+function transcriptText(msgs: ChatMsg[], cap = 1500): string {
+  let out = msgs.map((m) => `${m.role === "user" ? "You" : "Cotton AI"}: ${m.content}`).join("\n\n");
+  if (out.length > cap) out = out.slice(0, cap) + "\n\n…(transcript truncated — ask for the full export)";
+  return out;
+}
+const shareWhatsAppText = (text: string) => window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
+
 const SCOPE_OPTIONS: { label: string; days: number | null }[] = [
   { label: "Last 7 days", days: 7 },
   { label: "Last 30 days", days: 30 },
@@ -59,7 +70,7 @@ const SCOPE_OPTIONS: { label: string; days: number | null }[] = [
   { label: "Entire mailbox", days: null },
 ];
 
-export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: boolean; userName?: string }) {
+export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAdmin: boolean; userName?: string; orgId?: string | null }) {
   const [mode, setMode] = useState<"inbox" | "offers">("inbox");
   const [emails, setEmails] = useState<Email[]>([]);
   const [attCounts, setAttCounts] = useState<Record<string, number>>({});
@@ -94,6 +105,12 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
   const [inspectorLabel, setInspectorLabel] = useState<string | null>(null);
   const [inspectorCards, setInspectorCards] = useState<SourceCard[]>([]);
 
+  // Artifact side-panel (claude.ai style) — generated spreadsheet preview, collapsible.
+  const [artifact, setArtifact] = useState<{ a: MailboxArtifact; aoa: string[][] } | null>(null);
+  const [artifactCollapsed, setArtifactCollapsed] = useState(false);
+  const [artifactLoading, setArtifactLoading] = useState(false);
+  const [artifactErr, setArtifactErr] = useState<string | null>(null);
+
   // status
   const [conn, setConn] = useState<MailboxStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
@@ -113,12 +130,11 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
   }, []);
 
   const loadStatus = useCallback(async () => {
-    if (!isPlatformAdmin) return;
     try {
       const { data: { session } } = await supabase.auth.getSession();
       if (session?.access_token) setConn(await getMailboxStatus(session.access_token));
     } catch { /* ignore */ }
-  }, [isPlatformAdmin]);
+  }, []);
 
   useEffect(() => { void loadEmails(); void loadStatus(); }, [loadEmails, loadStatus]);
 
@@ -159,6 +175,41 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
     }
   }, [selectEmail]);
 
+  // Download (or OS-share-sheet) a generated file. Signed URL is re-minted on
+  // demand from the stored path (so reloaded chats keep working).
+  const openArtifact = useCallback(async (a: MailboxArtifact, share: boolean) => {
+    const { data } = await supabase.storage.from("exports").createSignedUrl(a.storagePath, 600);
+    if (!data?.signedUrl) return;
+    if (!share) { window.open(data.signedUrl, "_blank"); return; }
+    try {
+      const resp = await fetch(data.signedUrl);
+      const blob = await resp.blob();
+      const file = new File([blob], a.name, { type: blob.type });
+      // deno-lint-ignore no-explicit-any
+      const nav = navigator as any;
+      if (nav.canShare && nav.canShare({ files: [file] })) { await nav.share({ files: [file], title: a.name }); return; }
+    } catch { /* fall through to download */ }
+    window.open(data.signedUrl, "_blank");
+  }, []);
+
+  // Open the generated spreadsheet in the side panel (download + parse for preview).
+  const openArtifactPane = useCallback(async (a: MailboxArtifact) => {
+    setArtifactErr(null); setArtifactLoading(true); setArtifactCollapsed(false); setArtifact({ a, aoa: [] });
+    try {
+      const { data } = await supabase.storage.from("exports").createSignedUrl(a.storagePath, 600);
+      if (!data?.signedUrl) throw new Error("could not open file");
+      const resp = await fetch(data.signedUrl);
+      const buf = new Uint8Array(await resp.arrayBuffer());
+      const wb = XLSX.read(buf, { type: "array" });
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const aoa = (XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][])
+        .map((r) => r.map((c) => String(c ?? "")));
+      setArtifact({ a, aoa });
+    } catch (e) {
+      setArtifactErr(e instanceof Error ? e.message : String(e));
+    } finally { setArtifactLoading(false); }
+  }, []);
+
   // Close the preview modal on Escape.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPreviewUrl(null); };
@@ -197,11 +248,11 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
         .update({ title, messages: allMsgs }).eq("id", currentChatIdRef.current);
     } else {
       const { data } = await supabase.from("mailbox_chats")
-        .insert({ user_id: uid, title, messages: allMsgs, email_id: selectedId }).select("id").single();
+        .insert({ user_id: uid, title, messages: allMsgs, email_id: selectedId, org_id: orgId ?? null }).select("id").single();
       if (data?.id) { currentChatIdRef.current = data.id; setCurrentChatId(data.id); }
     }
     void loadHistory();
-  }, [selectedId, loadHistory]);
+  }, [selectedId, orgId, loadHistory]);
 
   const newChat = useCallback(() => {
     setMessages([]); setPreview(""); setChatErr(null);
@@ -229,6 +280,7 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
       const scope = selectedId && !wholeMailbox ? "email" : "global";
       let acc = "";
       let finalSources: SourceCard[] = [];
+      const artifacts: MailboxArtifact[] = [];
       await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, timelineLabel: tl.label }, (ev: MailboxEvent) => {
         if (ev.t === "tok") { acc += ev.v; setPreview(acc); }
         else if (ev.t === "act") {
@@ -237,18 +289,21 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
         } else if (ev.t === "src") {
           finalSources = (ev.cards as SourceCard[]) ?? [];
           setInspectorCards(dedupeCards(finalSources));
+        } else if (ev.t === "artifact") {
+          artifacts.push(ev.file);
         } else if (ev.t === "err") {
           setChatErr(ev.m);
         }
       });
-      const finalMsgs = [...msgs, { role: "assistant" as const, content: acc.trim(), sources: finalSources }];
+      const finalMsgs = [...msgs, { role: "assistant" as const, content: acc.trim(), sources: finalSources, artifacts: artifacts.length ? artifacts : undefined }];
       setMessages(finalMsgs);
       setPreview(""); setInspectorLabel(null);
       void persistChat(finalMsgs);
+      if (artifacts.length) void openArtifactPane(artifacts[artifacts.length - 1]); // claude.ai-style: open the file panel
     } catch (e) {
       setChatErr(e instanceof Error ? e.message : String(e));
     } finally { setSending(false); }
-  }, [selectedId, wholeMailbox, persistChat]);
+  }, [selectedId, wholeMailbox, persistChat, openArtifactPane]);
 
   const send = useCallback(() => {
     const text = input.trim();
@@ -293,7 +348,7 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
       <ModeBar mode={mode} setMode={setMode} conn={conn} isPlatformAdmin={isPlatformAdmin}
         syncing={syncing} syncMsg={syncMsg} onSync={runSync} emailCount={emails.length} />
       <div style={{
@@ -402,6 +457,9 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
                 whole mailbox
               </label>
             )}
+            {messages.length > 0 && (
+              <button onClick={() => shareWhatsAppText(transcriptText(messages))} title="Share transcript on WhatsApp" style={hdrBtn}>Share</button>
+            )}
             <button onClick={newChat} title="New chat" style={hdrBtn}>+ New</button>
             <div style={{ position: "relative" }}>
               <button onClick={() => { setHistoryOpen((o) => !o); if (!historyOpen) void loadHistory(); }} title="Chat history" style={hdrBtn}>History</button>
@@ -466,6 +524,26 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
                       ))}
                     </div>
                   </div>
+                )}
+                {m.role === "assistant" && m.artifacts && m.artifacts.length > 0 && (
+                  <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                    {m.artifacts.map((a, k) => (
+                      <div key={k} onClick={() => void openArtifactPane(a)} role="button" tabIndex={0}
+                        onKeyDown={(e) => { if (e.key === "Enter") void openArtifactPane(a); }}
+                        style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 10, cursor: "pointer", background: "rgba(200,169,110,0.10)", border: "1px solid rgba(200,169,110,0.30)", maxWidth: 380 }}>
+                        <span style={{ fontSize: 16 }}>📊</span>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</span>
+                        <button style={artBtn} onClick={(e) => { e.stopPropagation(); void openArtifact(a, false); }}>Download</button>
+                        <button style={artBtn} onClick={(e) => { e.stopPropagation(); void openArtifact(a, true); }}>Share</button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {m.role === "assistant" && m.content && (
+                  <button onClick={() => shareWhatsAppText(m.content)} title="Share this answer on WhatsApp"
+                    style={{ marginTop: 8, alignSelf: "flex-start", fontSize: 11, background: "none", border: "none", color: "rgba(200,169,110,0.85)", cursor: "pointer", padding: 0 }}>
+                    ↗ Share answer
+                  </button>
                 )}
               </div>
             ))}
@@ -554,6 +632,43 @@ export function MailboxView({ isPlatformAdmin, userName }: { isPlatformAdmin: bo
         </div>
       </div>
 
+      {/* Artifact side panel (generated spreadsheet) — claude.ai style, collapsible */}
+      {artifact && !artifactCollapsed && (
+        <div style={artifactDrawer}>
+          <div style={artifactHeader}>
+            <span style={{ fontSize: 16 }}>📊</span>
+            <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{artifact.a.name}</span>
+            <button style={artBtn} onClick={() => void openArtifact(artifact.a, false)}>Download</button>
+            <button style={artBtn} onClick={() => void openArtifact(artifact.a, true)}>Share</button>
+            <button style={artIconBtn} title="Collapse" onClick={() => setArtifactCollapsed(true)}>—</button>
+            <button style={artIconBtn} title="Close" onClick={() => setArtifact(null)}>✕</button>
+          </div>
+          <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
+            {artifactLoading && <p style={{ opacity: 0.6, fontSize: 13 }}>Loading sheet…</p>}
+            {artifactErr && <p style={{ color: RED, fontSize: 13 }}>{artifactErr}</p>}
+            {!artifactLoading && artifact.aoa.length > 0 && (
+              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                <tbody>
+                  {artifact.aoa.slice(0, 500).map((row, ri) => (
+                    <tr key={ri}>
+                      {row.map((cell, ci) => (
+                        ri === 0
+                          ? <th key={ci} style={artTh}>{cell}</th>
+                          : <td key={ci} style={artTd}>{cell}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {artifact.aoa.length > 500 && <p style={{ opacity: 0.5, fontSize: 11, marginTop: 8 }}>Showing first 500 rows — download for the full sheet.</p>}
+          </div>
+        </div>
+      )}
+      {artifact && artifactCollapsed && (
+        <button style={artifactTab} onClick={() => setArtifactCollapsed(false)} title="Expand spreadsheet">📊 ◂</button>
+      )}
+
       {previewUrl && (
         <div onClick={() => setPreviewUrl(null)} style={modalBackdrop}>
           <div onClick={(e) => e.stopPropagation()} style={modalCard}>
@@ -576,8 +691,9 @@ function ModeBar({ mode, setMode, conn, isPlatformAdmin, syncing, syncMsg, onSyn
   mode: "inbox" | "offers"; setMode: (m: "inbox" | "offers") => void; conn: MailboxStatus | null;
   isPlatformAdmin: boolean; syncing: boolean; syncMsg: string | null; onSync: () => void; emailCount: number;
 }) {
+  void isPlatformAdmin; // sync + status are available to everyone (shared mailbox)
   const ok = conn?.connected;
-  const color = !isPlatformAdmin ? GREY : ok ? (conn?.mailboxMismatch ? AMBER : GREEN) : conn ? RED : GREY;
+  const color = ok ? (conn?.mailboxMismatch ? AMBER : GREEN) : conn ? RED : GREY;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 14px", borderBottom: "1px solid rgba(255,255,255,0.08)", flexWrap: "wrap" }}>
       <div style={{ display: "inline-flex", gap: 4, background: "rgba(255,255,255,0.05)", borderRadius: 8, padding: 3 }}>
@@ -589,18 +705,14 @@ function ModeBar({ mode, setMode, conn, isPlatformAdmin, syncing, syncMsg, onSyn
           }}>{m === "inbox" ? "Inbox" : "Offers table"}</button>
         ))}
       </div>
-      {isPlatformAdmin && (
-        <span title={conn?.error ?? ""} style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12 }}>
-          <span style={{ width: 8, height: 8, borderRadius: "50%", background: color }} />
-          {ok ? `Connected · ${conn?.mailbox}` : conn ? "Not connected" : "Checking…"}
-        </span>
-      )}
+      <span title={conn?.error ?? ""} style={{ display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12 }}>
+        <span style={{ width: 8, height: 8, borderRadius: "50%", background: color }} />
+        {ok ? `Connected · ${conn?.mailbox}` : conn ? "Not connected" : "Checking…"}
+      </span>
       <span style={{ fontSize: 12, opacity: 0.6 }}>{emailCount} emails</span>
       <div style={{ flex: 1 }} />
       {syncMsg && <span style={{ fontSize: 12, opacity: 0.8 }}>{syncMsg}</span>}
-      {isPlatformAdmin && (
-        <button className="btn btn-ghost" onClick={onSync} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</button>
-      )}
+      <button className="btn btn-ghost" onClick={onSync} disabled={syncing}>{syncing ? "Syncing…" : "Sync now"}</button>
     </div>
   );
 }
@@ -650,6 +762,35 @@ const userBubble: React.CSSProperties = {
 const hdrBtn: React.CSSProperties = {
   fontSize: 11.5, padding: "4px 10px", borderRadius: 7, cursor: "pointer",
   background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", color: "inherit",
+};
+const artBtn: React.CSSProperties = {
+  fontSize: 11, padding: "4px 9px", borderRadius: 6, cursor: "pointer",
+  background: "rgba(255,255,255,0.08)", border: "1px solid rgba(200,169,110,0.3)", color: "inherit",
+};
+const artIconBtn: React.CSSProperties = {
+  width: 26, height: 26, borderRadius: 6, cursor: "pointer", fontSize: 14, lineHeight: 1,
+  background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", color: "inherit",
+};
+const artifactDrawer: React.CSSProperties = {
+  position: "absolute", top: 0, right: 0, bottom: 0, width: "min(620px, 64%)", zIndex: 40,
+  display: "flex", flexDirection: "column", background: "#14161b",
+  borderLeft: "1px solid rgba(200,169,110,0.35)", boxShadow: "-18px 0 50px rgba(0,0,0,0.45)",
+};
+const artifactHeader: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 8, padding: "11px 14px",
+  borderBottom: "1px solid rgba(255,255,255,0.1)",
+};
+const artifactTab: React.CSSProperties = {
+  position: "absolute", top: 80, right: 0, zIndex: 40, cursor: "pointer", fontSize: 12,
+  padding: "9px 11px", borderRadius: "10px 0 0 10px", color: "inherit",
+  background: "rgba(200,169,110,0.16)", border: "1px solid rgba(200,169,110,0.35)", borderRight: "none",
+};
+const artTh: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.12)", padding: "6px 9px", textAlign: "left",
+  whiteSpace: "nowrap", background: "rgba(200,169,110,0.14)", color: "#dbbd84", fontWeight: 600, position: "sticky", top: 0,
+};
+const artTd: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.1)", padding: "6px 9px", textAlign: "left", whiteSpace: "nowrap",
 };
 
 const inp: React.CSSProperties = {

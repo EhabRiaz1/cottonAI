@@ -143,10 +143,12 @@ export async function triggerExtraction(
 }
 
 // deno-lint-ignore-next-line
+export type MailboxArtifact = { name: string; format: string; storagePath: string };
 export type MailboxEvent =
   | { t: "act"; label?: string; cards?: unknown[] }
   | { t: "tok"; v: string }
   | { t: "src"; cards: unknown[] }
+  | { t: "artifact"; file: MailboxArtifact }
   | { t: "err"; m: string };
 
 /**
