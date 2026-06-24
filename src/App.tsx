@@ -45,7 +45,7 @@ function App() {
 
     const { data: rows, error: omErr } = await supabase
       .from("org_members")
-      .select("org_id, user_id, role, organizations ( id, name, notes, created_at )")
+      .select("org_id, user_id, role, organizations ( id, name, notes, created_at, email, is_active )")
       .eq("user_id", uid)
       .limit(1);
     if (omErr) {
@@ -55,7 +55,7 @@ function App() {
     if (isPA) {
       const { data: orgsList } = await supabase
         .from("organizations")
-        .select("id, name, notes, created_at")
+        .select("id, name, notes, created_at, email, is_active")
         .order("name");
       setAllOrgs((orgsList as Org[] | null) ?? []);
     } else {
