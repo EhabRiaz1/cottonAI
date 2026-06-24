@@ -70,6 +70,18 @@ const SCOPE_OPTIONS: { label: string; days: number | null }[] = [
   { label: "Entire mailbox", days: null },
 ];
 
+// Pending-LC list: the agent pulls contracts from the Elithum portal. We ask the
+// Date-of-Sale window as a claude.ai-style multiple choice (D = custom range).
+const LC_RANGE_OPTIONS: { label: string; years: number | null }[] = [
+  { label: "Last 1 year", years: 1 },
+  { label: "Last 2 years", years: 2 },
+  { label: "Last 5 years", years: 5 },
+  { label: "Custom date range…", years: null },
+];
+// Detects a "Pending LC's list" style request so we route to Elithum, not the mailbox.
+const PENDING_LC_RE = /(pending\s*l\.?\/?c)|(\blc'?s?\b[^.]*\blist\b)|(letter\s+of\s+credit)/i;
+const PENDING_LC_PROMPT = "Make me a Pending LC's list";
+
 export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAdmin: boolean; userName?: string; orgId?: string | null }) {
   const [mode, setMode] = useState<"inbox" | "offers">("inbox");
   const [emails, setEmails] = useState<Email[]>([]);
@@ -93,6 +105,14 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   // Timeline scope — asked as a multiple-choice question before the first answer.
   const [timeline, setTimeline] = useState<{ label: string; dateFrom: string | null } | null>(null);
   const [pendingMessages, setPendingMessages] = useState<ChatMsg[] | null>(null);
+
+  // Pending-LC clarification — its own state machine, separate from the mailbox
+  // timeline gate (a Pending-LC request must NOT trigger "how far back in your mailbox").
+  const [pendingLcAsk, setPendingLcAsk] = useState<ChatMsg[] | null>(null);
+  const [lcCustom, setLcCustom] = useState(false);
+  const [lcFrom, setLcFrom] = useState("");
+  const [lcTo, setLcTo] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   // Saved conversation history.
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
@@ -257,6 +277,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   const newChat = useCallback(() => {
     setMessages([]); setPreview(""); setChatErr(null);
     setTimeline(null); setPendingMessages(null);
+    setPendingLcAsk(null); setLcCustom(false);
     setInspectorOpen(false); setInspectorCards([]); setInspectorLabel(null);
     currentChatIdRef.current = null; setCurrentChatId(null); setHistoryOpen(false);
   }, []);
@@ -266,12 +287,16 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
     if (data) {
       setMessages((data.messages as ChatMsg[]) ?? []);
       currentChatIdRef.current = id; setCurrentChatId(id);
-      setPreview(""); setPendingMessages(null); setInspectorOpen(false);
+      setPreview(""); setPendingMessages(null); setPendingLcAsk(null); setInspectorOpen(false);
     }
     setHistoryOpen(false);
   }, []);
 
-  const runAgent = useCallback(async (msgs: ChatMsg[], tl: { label: string; dateFrom: string | null }) => {
+  const runAgent = useCallback(async (
+    msgs: ChatMsg[],
+    tl: { label: string; dateFrom: string | null },
+    pendingLc?: { dateFrom: string | null; dateTo: string | null; label: string },
+  ) => {
     setSending(true); setPreview(""); setChatErr(null);
     setInspectorOpen(true); setInspectorLabel(null); setInspectorCards([]);
     try {
@@ -281,7 +306,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
       let acc = "";
       let finalSources: SourceCard[] = [];
       const artifacts: MailboxArtifact[] = [];
-      await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, timelineLabel: tl.label }, (ev: MailboxEvent) => {
+      await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, timelineLabel: tl.label, pendingLc: pendingLc ?? null }, (ev: MailboxEvent) => {
         if (ev.t === "tok") { acc += ev.v; setPreview(acc); }
         else if (ev.t === "act") {
           if (ev.label) setInspectorLabel(ev.label);
@@ -307,14 +332,16 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || sending || pendingMessages) return;
+    if (!text || sending || pendingMessages || pendingLcAsk) return;
     setInput("");
     const next = [...messages, { role: "user" as const, content: text }];
     setMessages(next);
-    // First prompt of a thread → ask the timeline as a multiple-choice question.
+    // Pending-LC request → ask the Date-of-Sale range (Elithum), bypass the mailbox timeline gate.
+    if (PENDING_LC_RE.test(text)) { setPendingLcAsk(next); setLcCustom(false); return; }
+    // Otherwise: first prompt of a thread → ask the mailbox timeline.
     if (!timeline) setPendingMessages(next);
     else void runAgent(next, timeline);
-  }, [input, sending, messages, timeline, pendingMessages, runAgent]);
+  }, [input, sending, messages, timeline, pendingMessages, pendingLcAsk, runAgent]);
 
   const chooseScope = useCallback((label: string, days: number | null) => {
     const dateFrom = days == null ? null : new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
@@ -323,6 +350,25 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
     const pend = pendingMessages; setPendingMessages(null);
     if (pend) void runAgent(pend, tl);
   }, [pendingMessages, runAgent]);
+
+  const todayISO = () => new Date().toISOString().slice(0, 10);
+  const runPendingLc = useCallback((pend: ChatMsg[], dateFrom: string | null, dateTo: string, label: string) => {
+    setPendingLcAsk(null); setLcCustom(false);
+    // Pending-LC bypasses the mailbox timeline entirely (it queries Elithum Date-of-Sale).
+    void runAgent(pend, { label: "", dateFrom: null }, { dateFrom, dateTo, label });
+  }, [runAgent]);
+
+  const chooseLcRange = useCallback((years: number | null) => {
+    const pend = pendingLcAsk; if (!pend) return;
+    if (years == null) { setLcCustom(true); return; } // reveal custom date inputs (the "type your own" path)
+    const d = new Date(); d.setFullYear(d.getFullYear() - years);
+    runPendingLc(pend, d.toISOString().slice(0, 10), todayISO(), `Last ${years} year${years > 1 ? "s" : ""}`);
+  }, [pendingLcAsk, runPendingLc]);
+
+  const chooseLcCustom = useCallback(() => {
+    const pend = pendingLcAsk; if (!pend || !lcFrom || !lcTo) return;
+    runPendingLc(pend, lcFrom, lcTo, `${lcFrom} → ${lcTo}`);
+  }, [pendingLcAsk, lcFrom, lcTo, runPendingLc]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, preview]);
 
@@ -495,6 +541,12 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
                     ? "Ask about this email and its attachments — e.g. “summarize the offers in the PDF”."
                     : "Ask across your whole cotton mailbox — e.g. “cheapest US GC under 30 days old”."}
                 </p>
+                <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", marginTop: 16 }}>
+                  <button className="scope-option" style={{ width: "auto", display: "inline-block" }}
+                    onClick={() => { setInput(PENDING_LC_PROMPT + " for "); inputRef.current?.focus(); }}>
+                    📋 Pending LC's list
+                  </button>
+                </div>
               </div>
             )}
             {messages.map((m, i) => (
@@ -562,6 +614,37 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
                 </div>
               </div>
             )}
+            {pendingLcAsk && (
+              <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
+                <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
+                <div style={aiBubble}>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 4 }}>Pending LC's list — what date range?</div>
+                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>By Date of Sale in Elithum.</div>
+                  {!lcCustom ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {LC_RANGE_OPTIONS.map((o) => (
+                        <button key={o.label} className="scope-option" onClick={() => chooseLcRange(o.years)}>
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <label style={{ fontSize: 12, opacity: 0.8 }}>From
+                        <input type="date" value={lcFrom} onChange={(e) => setLcFrom(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+                      </label>
+                      <label style={{ fontSize: 12, opacity: 0.8 }}>To
+                        <input type="date" value={lcTo} onChange={(e) => setLcTo(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+                      </label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="btn btn-primary" disabled={!lcFrom || !lcTo} onClick={chooseLcCustom}>Generate</button>
+                        <button className="scope-option" style={{ width: "auto" }} onClick={() => setLcCustom(false)}>← Back</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {preview && (
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
                 <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
@@ -586,11 +669,11 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
               </div>
             )}
             <div style={{ display: "flex", gap: 8 }}>
-              <textarea value={input} onChange={(e) => setInput(e.target.value)}
+              <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder={pendingMessages ? "Pick a timeline above…" : "Message the mailbox…"} rows={2}
-                style={{ ...inp, resize: "none", flex: 1 }} disabled={sending || !!pendingMessages} />
-              <button onClick={() => send()} disabled={sending || !!pendingMessages || !input.trim()} className="btn btn-primary"
+                placeholder={pendingMessages ? "Pick a timeline above…" : pendingLcAsk ? "Pick a date range above…" : "Message the mailbox…"} rows={2}
+                style={{ ...inp, resize: "none", flex: 1 }} disabled={sending || !!pendingMessages || !!pendingLcAsk} />
+              <button onClick={() => send()} disabled={sending || !!pendingMessages || !!pendingLcAsk || !input.trim()} className="btn btn-primary"
                 style={{ alignSelf: "stretch" }}>Send</button>
             </div>
           </div>
@@ -646,21 +729,29 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
           <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
             {artifactLoading && <p style={{ opacity: 0.6, fontSize: 13 }}>Loading sheet…</p>}
             {artifactErr && <p style={{ color: RED, fontSize: 13 }}>{artifactErr}</p>}
-            {!artifactLoading && artifact.aoa.length > 0 && (
-              <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
-                <tbody>
-                  {artifact.aoa.slice(0, 500).map((row, ri) => (
-                    <tr key={ri}>
-                      {row.map((cell, ci) => (
-                        ri === 0
-                          ? <th key={ci} style={artTh}>{cell}</th>
-                          : <td key={ci} style={artTd}>{cell}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            {!artifactLoading && artifact.aoa.length > 0 && (() => {
+              // Pending-LC sheets carry a "Delay (No. of Days)" column — tint overdue rows red.
+              const header = artifact.aoa[0] ?? [];
+              const delayIdx = header.findIndex((h) => /delay/i.test(h));
+              return (
+                <table style={{ borderCollapse: "collapse", fontSize: 12 }}>
+                  <tbody>
+                    {artifact.aoa.slice(0, 500).map((row, ri) => {
+                      const overdue = ri > 0 && delayIdx >= 0 && Number(row[delayIdx]) > 0;
+                      return (
+                        <tr key={ri} style={overdue ? { background: "rgba(231,76,60,0.16)" } : undefined}>
+                          {row.map((cell, ci) => (
+                            ri === 0
+                              ? <th key={ci} style={artTh}>{cell}</th>
+                              : <td key={ci} style={ci === delayIdx && overdue ? { ...artTd, color: RED, fontWeight: 600 } : artTd}>{cell}</td>
+                          ))}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              );
+            })()}
             {artifact.aoa.length > 500 && <p style={{ opacity: 0.5, fontSize: 11, marginTop: 8 }}>Showing first 500 rows — download for the full sheet.</p>}
           </div>
         </div>

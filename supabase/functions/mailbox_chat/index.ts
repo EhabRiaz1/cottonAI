@@ -4,6 +4,9 @@ import * as XLSX from "https://esm.sh/xlsx@0.18.5";
 import { cors } from "../_shared/cors.ts";
 import { DEFAULT_CHAT_MODEL } from "../_shared/anthropic.ts";
 import { OFFER_TOOLS, runOfferTool } from "../_shared/offer_tools.ts";
+import {
+  deriveRow, PENDING_LC_COLUMNS, pktTodayISO, type RawContract, rowToCells,
+} from "../_shared/lc_derive.ts";
 
 // mailbox_chat — "talk to your cotton mailbox". Stateless: the frontend holds the
 // conversation and posts the message array. The agent can search the structured
@@ -65,6 +68,26 @@ const MAILBOX_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "query_elithum",
+    description:
+      "Build a 'Pending LC's list' from the company's Elithum contracts portal (READ-ONLY). " +
+      "Call this ONLY for a pending letter-of-credit (LC) list request — NOT for mailbox/offer " +
+      "questions. It reads Elithum, computes LC Due Date and Delay, and generates the Excel " +
+      "automatically (do NOT also call make_file). Pass date_from/date_to (YYYY-MM-DD) for the " +
+      "Date-of-Sale window, and buyer/seller ONLY if the user named one.",
+    input_schema: {
+      type: "object",
+      properties: {
+        date_from: { type: "string", description: "Earliest Date of Sale, YYYY-MM-DD" },
+        date_to: { type: "string", description: "Latest Date of Sale, YYYY-MM-DD" },
+        buyer: { type: "string", description: "Buyer name filter (optional, case-insensitive contains)" },
+        seller: { type: "string", description: "Seller name filter (optional, case-insensitive contains)" },
+      },
+      required: [],
+      additionalProperties: false,
+    },
+  },
 ];
 const WEB_SEARCH_TOOL = { type: "web_search_20260209", name: "web_search" };
 
@@ -95,8 +118,10 @@ Deno.serve(async (req: Request) => {
   if (!user) return j({ error: "Unauthorized" }, 401);
 
   type Msg = { role: "user" | "assistant"; content: string };
-  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; timelineLabel?: string } = {};
+  type PendingLc = { dateFrom?: string | null; dateTo?: string | null; label?: string };
+  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; timelineLabel?: string; pendingLc?: PendingLc | null } = {};
   try { body = await req.json(); } catch { return j({ error: "Invalid JSON" }, 400); }
+  const pendingLc = body.pendingLc && typeof body.pendingLc === "object" ? body.pendingLc : null;
   const dateFrom = typeof body.dateFrom === "string" && body.dateFrom ? body.dateFrom : null;
   const timelineLabel = body.timelineLabel || (dateFrom ? `since ${dateFrom}` : "entire mailbox");
   const clientMessages = (body.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant");
@@ -178,7 +203,10 @@ Deno.serve(async (req: Request) => {
   const timelineNote = scope === "email" ? "" : (dateFrom
     ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nONLY consider offers dated on or after ${dateFrom}. Pass date_from:"${dateFrom}" to search_offers and search the FULL range EXHAUSTIVELY with a high limit (e.g. 300). Do NOT base a broad answer on a single document or only the most recent offers.`
     : `\n\n## Timeline scope (user-selected: entire mailbox)\nSearch comprehensively across ALL brokers and dates — call search_offers with a high limit (e.g. 400) and review the whole pool. Do NOT answer a broad question from a single document or only the most recent offers.`);
-  const systemText = `${BASE_PROMPT}${refContext ? `\n\n## Cotton Reference (authoritative field meanings):${refContext}` : ""}${focusNote}${timelineNote}${GUIDANCE(scope)}`;
+  const pendingLcNote = pendingLc
+    ? `\n\n## PENDING LC REQUEST (priority)\nThe user asked for a Pending LC's list from the Elithum portal. Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many pending LCs, how many are overdue (Delay > 0), and how many need manual review. The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+    : "";
+  const systemText = `${BASE_PROMPT}${refContext ? `\n\n## Cotton Reference (authoritative field meanings):${refContext}` : ""}${focusNote}${timelineNote}${pendingLcNote}${GUIDANCE(scope)}`;
   const nowMs = Date.now();
 
   // NDJSON event stream: {t:"act"} live tool activity (which docs it's viewing),
@@ -232,6 +260,11 @@ Deno.serve(async (req: Request) => {
               } else if (b.name === "make_file") {
                 emit({ t: "act", label: "Building Excel…" });
                 const r = await runMakeFile(admin, user.id, b.input ?? {});
+                out = r.toolResult;
+                if (r.artifact) emit({ t: "artifact", file: r.artifact });
+              } else if (b.name === "query_elithum") {
+                emit({ t: "act", label: "Querying Elithum…" });
+                const r = await runQueryElithum(admin, user.id, b.input ?? {}, pendingLc);
                 out = r.toolResult;
                 if (r.artifact) emit({ t: "artifact", file: r.artifact });
               } else {
@@ -405,6 +438,136 @@ async function runMakeFile(
   } catch (e) {
     return { toolResult: { error: `xlsx generation failed: ${e instanceof Error ? e.message : String(e)}` } };
   }
+}
+
+// --- Elithum (read-only Firestore) ---------------------------------------
+// Elithum is a Firebase app; its contracts live in the `entries` Firestore
+// collection (project elithium-4a2dd). We sign in with the company login
+// (stored as Supabase secrets) and READ ONLY — only ever :runQuery / GET,
+// never a write. The web API key is public (it ships in Elithum's client).
+const ELITHUM_FB_API_KEY = Deno.env.get("ELITHUM_FB_API_KEY") ?? "AIzaSyCfgmxB0e_31Bz21d0_5OpGqV7BGqJSIho";
+const ELITHUM_PROJECT = Deno.env.get("ELITHUM_FB_PROJECT") ?? "elithium-4a2dd";
+const FS_DOCS = `https://firestore.googleapis.com/v1/projects/${ELITHUM_PROJECT}/databases/(default)/documents`;
+const FS_FIELDS = ["Contract", "Buyer", "Seller", "Growth", "fixedPrice", "shipmentMonth", "DoS", "LC_draft", "Trans_LC", "LC_Num"];
+
+let _elithumTok: { token: string; exp: number } | null = null;
+async function elithumIdToken(): Promise<string> {
+  if (_elithumTok && Date.now() < _elithumTok.exp - 60_000) return _elithumTok.token;
+  const email = Deno.env.get("ELITHUM_EMAIL");
+  const password = Deno.env.get("ELITHUM_PASSWORD");
+  if (!email || !password) throw new Error("auth: Elithum credentials not configured");
+  const res = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${ELITHUM_FB_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password, returnSecureToken: true }),
+      signal: AbortSignal.timeout(10_000),
+    },
+  );
+  if (!res.ok) throw new Error(`auth: Elithum sign-in ${res.status}`);
+  const d = await res.json();
+  _elithumTok = { token: d.idToken, exp: Date.now() + (Number(d.expiresIn ?? 3600) * 1000) };
+  return d.idToken;
+}
+
+// deno-lint-ignore no-explicit-any
+function fsUnwrap(v: any): string {
+  if (v == null) return "";
+  if ("stringValue" in v) return v.stringValue ?? "";
+  if ("integerValue" in v) return String(v.integerValue);
+  if ("doubleValue" in v) return String(v.doubleValue);
+  if ("timestampValue" in v) return v.timestampValue ?? "";
+  return "";
+}
+
+// Read the `entries` collection (DoS-range scoped), projecting only the fields we
+// need (skips the huge nested ips[] arrays). Buyer/seller filtering happens in JS
+// (Firestore has no case-insensitive "contains").
+async function queryElithumContracts(dateFrom?: string, dateTo?: string): Promise<RawContract[]> {
+  const token = await elithumIdToken();
+  const filters: unknown[] = [];
+  if (dateFrom) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "GREATER_THAN_OR_EQUAL", value: { stringValue: dateFrom } } });
+  if (dateTo) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "LESS_THAN_OR_EQUAL", value: { stringValue: dateTo } } });
+  // deno-lint-ignore no-explicit-any
+  const structuredQuery: any = {
+    from: [{ collectionId: "entries" }],
+    select: { fields: FS_FIELDS.map((f) => ({ fieldPath: f })) },
+    limit: 5000,
+  };
+  if (filters.length === 1) structuredQuery.where = filters[0];
+  else if (filters.length > 1) structuredQuery.where = { compositeFilter: { op: "AND", filters } };
+
+  const res = await fetch(`${FS_DOCS}:runQuery`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ structuredQuery }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`firestore ${res.status}`);
+  const rows = await res.json();
+  const out: RawContract[] = [];
+  for (const r of rows ?? []) {
+    const doc = r.document;
+    if (!doc) continue;
+    const f = doc.fields ?? {};
+    // deno-lint-ignore no-explicit-any
+    const rec: any = {};
+    for (const k of FS_FIELDS) rec[k] = fsUnwrap(f[k]);
+    out.push(rec);
+  }
+  // schema guard: a non-empty result with no Contract anywhere means the shape drifted.
+  if (out.length && !out.some((r) => r.Contract)) throw new Error("schema drift");
+  return out;
+}
+
+// Build the Pending-LC xlsx from Elithum. Pending = LC_draft blank. Derivation is
+// deterministic (lc_derive.ts). Returns {error} (never throws) so the model narrates failures.
+async function runQueryElithum(
+  admin: SupabaseClient,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+  pendingLc: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const dateFrom = (input?.date_from || pendingLc?.dateFrom || "") || undefined;
+  const dateTo = (input?.date_to || pendingLc?.dateTo || "") || undefined;
+  const buyer = String(input?.buyer ?? "").trim().toLowerCase();
+  const seller = String(input?.seller ?? "").trim().toLowerCase();
+
+  let raw: RawContract[];
+  try {
+    raw = await queryElithumContracts(dateFrom, dateTo);
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    if (/^auth|sign-in|40[13]/.test(msg)) return { toolResult: { error: "Couldn't sign in to Elithum (check the connection). Tell the user the Elithum connection failed; do NOT invent any contract data." } };
+    if (/schema drift/.test(msg)) return { toolResult: { error: "Elithum's data format changed unexpectedly; do NOT produce a sheet. Tell the user to check the Elithum integration." } };
+    return { toolResult: { error: `Couldn't reach Elithum (${msg}). Tell the user; do NOT invent contract data.` } };
+  }
+
+  const today = pktTodayISO(new Date());
+  let pending = raw.filter((r) => !r.LC_draft || !String(r.LC_draft).trim()); // pending = LC_draft blank
+  if (buyer) pending = pending.filter((r) => (r.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) pending = pending.filter((r) => (r.Seller ?? "").toLowerCase().includes(seller));
+
+  if (!pending.length) {
+    return { toolResult: { pending_total: 0, as_of_pkt: today, source: "Elithum portal", message: "No pending LCs match that buyer/seller and date range." } };
+  }
+
+  const derived = pending.map((r) => deriveRow(r, today));
+  derived.sort((a, b) => b.delayDays - a.delayDays); // overdue first
+  const overdue = derived.filter((d) => d.delayDays > 0).length;
+  const needsReview = derived.filter((d) => d.lcDueStatus === "none").length;
+  const who = buyer ? ` ${derived[0].buyer}` : seller ? ` ${derived[0].seller}` : "";
+  const title = `Pending LCs${who} ${today}`.trim();
+
+  const r = await runMakeFile(admin, userId, { title, columns: PENDING_LC_COLUMNS, rows: derived.map(rowToCells) });
+  const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
+  if (base.error) return { toolResult: base }; // surface make_file failure verbatim
+  return {
+    toolResult: { ...base, pending_total: derived.length, overdue, needs_review: needsReview, as_of_pkt: today, source: "Elithum portal" },
+    artifact: r.artifact,
+  };
 }
 
 function excelToText(bytes: Uint8Array): string {

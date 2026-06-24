@@ -164,6 +164,7 @@ export async function streamMailboxChat(
     scope?: "email" | "global";
     dateFrom?: string | null;
     timelineLabel?: string;
+    pendingLc?: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null;
   },
   onEvent: (ev: MailboxEvent) => void,
 ): Promise<void> {
