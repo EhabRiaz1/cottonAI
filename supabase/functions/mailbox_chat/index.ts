@@ -5,7 +5,11 @@ import { cors } from "../_shared/cors.ts";
 import { DEFAULT_CHAT_MODEL } from "../_shared/anthropic.ts";
 import { OFFER_TOOLS, runOfferTool } from "../_shared/offer_tools.ts";
 import {
-  deriveRow, PENDING_LC_COLUMNS, pktTodayISO, type RawContract, rowToCells,
+  deriveDocsRow, deriveIPRow, derivePaymentsRow, deriveRow, deriveShipmentRow, docsRowToCells,
+  type DocsRow, type IPRow, ipRowToCells, paymentsRowToCells, type PaymentsRow,
+  PENDING_DOCS_COLUMNS, PENDING_IPS_COLUMNS, PENDING_LC_COLUMNS, PENDING_PAYMENTS_COLUMNS,
+  PENDING_SHIPMENTS_COLUMNS, pktTodayISO, type RawContract, type RawIP, type RawShipment,
+  rowToCells, type ShipmentRow, shipmentRowToCells,
 } from "../_shared/lc_derive.ts";
 
 // mailbox_chat — "talk to your cotton mailbox". Stateless: the frontend holds the
@@ -71,11 +75,12 @@ const MAILBOX_TOOLS = [
   {
     name: "query_elithum",
     description:
-      "Build a 'Pending LC's list' from the company's Elithum contracts portal (READ-ONLY). " +
-      "Call this ONLY for a pending letter-of-credit (LC) list request — NOT for mailbox/offer " +
-      "questions. It reads Elithum, computes LC Due Date and Delay, and generates the Excel " +
-      "automatically (do NOT also call make_file). Pass date_from/date_to (YYYY-MM-DD) for the " +
-      "Date-of-Sale window, and buyer/seller ONLY if the user named one.",
+      "Build a 'Pending LC's list' OR a 'Pending Shipments list' from the company's Elithum " +
+      "contracts portal (READ-ONLY). Call this ONLY for those Elithum report requests — NOT for " +
+      "mailbox/offer questions. It reads Elithum, derives the LC columns, and generates the Excel " +
+      "automatically (do NOT also call make_file). Which report to build is decided by the app, " +
+      "not by you — just call this once. Pass date_from/date_to (YYYY-MM-DD) for the Date-of-Sale " +
+      "window, and buyer/seller ONLY if the user named one.",
     input_schema: {
       type: "object",
       properties: {
@@ -118,7 +123,7 @@ Deno.serve(async (req: Request) => {
   if (!user) return j({ error: "Unauthorized" }, 401);
 
   type Msg = { role: "user" | "assistant"; content: string };
-  type PendingLc = { dateFrom?: string | null; dateTo?: string | null; label?: string };
+  type PendingLc = { dateFrom?: string | null; dateTo?: string | null; label?: string; report?: "lc" | "shipments" | "ips" | "docs" | "payments" };
   let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; timelineLabel?: string; pendingLc?: PendingLc | null } = {};
   try { body = await req.json(); } catch { return j({ error: "Invalid JSON" }, 400); }
   const pendingLc = body.pendingLc && typeof body.pendingLc === "object" ? body.pendingLc : null;
@@ -203,8 +208,25 @@ Deno.serve(async (req: Request) => {
   const timelineNote = scope === "email" ? "" : (dateFrom
     ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nONLY consider offers dated on or after ${dateFrom}. Pass date_from:"${dateFrom}" to search_offers and search the FULL range EXHAUSTIVELY with a high limit (e.g. 300). Do NOT base a broad answer on a single document or only the most recent offers.`
     : `\n\n## Timeline scope (user-selected: entire mailbox)\nSearch comprehensively across ALL brokers and dates — call search_offers with a high limit (e.g. 400) and review the whole pool. Do NOT answer a broad question from a single document or only the most recent offers.`);
+  const pendingReport = pendingLc?.report === "shipments"
+    ? "shipments"
+    : pendingLc?.report === "ips"
+    ? "ips"
+    : pendingLc?.report === "docs"
+    ? "docs"
+    : pendingLc?.report === "payments"
+    ? "payments"
+    : "lc";
   const pendingLcNote = pendingLc
-    ? `\n\n## PENDING LC REQUEST (priority)\nThe user asked for a Pending LC's list from the Elithum portal. Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many pending LCs, how many are overdue (Delay > 0), and how many need manual review. The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+    ? (pendingReport === "shipments"
+      ? `\n\n## PENDING SHIPMENTS REQUEST (priority)\nThe user asked for a Pending Shipments list from the Elithum portal. Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many are overdue (Delay > 0). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+      : pendingReport === "ips"
+      ? `\n\n## PENDING IPs REQUEST (priority)\nThe user asked for a Pending IPs list from the Elithum portal (one row per IP). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many IPs across how many contracts, and how many have not been sent to the supplier yet (not_sent). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+      : pendingReport === "docs"
+      ? `\n\n## PENDING DOCS REQUEST (priority)\nThe user asked for a Pending Docs list from the Elithum portal (one row per shipment, with document columns: Copy Docs, Disc Sent, Disc Received). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many have copy docs recorded (with_copy_docs). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+      : pendingReport === "payments"
+      ? `\n\n## PENDING PAYMENTS REQUEST (priority)\nThe user asked for a Pending Payments list from the Elithum portal (one row per shipment; same as Pending Docs plus a Payment Date column). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many have a payment date recorded (with_payment). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+      : `\n\n## PENDING LC REQUEST (priority)\nThe user asked for a Pending LC's list from the Elithum portal. This report now lists ALL contracts in the date range with their LC status (not just the ones missing an LC draft). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many contracts total, how many still have no LC draft (no_lc_draft), and how many are overdue (Delay > 0). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`)
     : "";
   const systemText = `${BASE_PROMPT}${refContext ? `\n\n## Cotton Reference (authoritative field meanings):${refContext}` : ""}${focusNote}${timelineNote}${pendingLcNote}${GUIDANCE(scope)}`;
   const nowMs = Date.now();
@@ -264,7 +286,17 @@ Deno.serve(async (req: Request) => {
                 if (r.artifact) emit({ t: "artifact", file: r.artifact });
               } else if (b.name === "query_elithum") {
                 emit({ t: "act", label: "Querying Elithum…" });
-                const r = await runQueryElithum(admin, user.id, b.input ?? {}, pendingLc);
+                // `report` is app-driven (frontend pendingLc payload), NOT the model's
+                // choice — so a model that forgets the report can't emit the wrong sheet.
+                const r = pendingReport === "shipments"
+                  ? await runQueryElithumShipments(admin, user.id, b.input ?? {}, pendingLc)
+                  : pendingReport === "ips"
+                  ? await runQueryElithumIPs(admin, user.id, b.input ?? {}, pendingLc)
+                  : pendingReport === "docs"
+                  ? await runQueryElithumDocs(admin, user.id, b.input ?? {}, pendingLc)
+                  : pendingReport === "payments"
+                  ? await runQueryElithumPayments(admin, user.id, b.input ?? {}, pendingLc)
+                  : await runQueryElithum(admin, user.id, b.input ?? {}, pendingLc);
                 out = r.toolResult;
                 if (r.artifact) emit({ t: "artifact", file: r.artifact });
               } else {
@@ -546,26 +578,457 @@ async function runQueryElithum(
   }
 
   const today = pktTodayISO(new Date());
-  let pending = raw.filter((r) => !r.LC_draft || !String(r.LC_draft).trim()); // pending = LC_draft blank
-  if (buyer) pending = pending.filter((r) => (r.Buyer ?? "").toLowerCase().includes(buyer));
-  if (seller) pending = pending.filter((r) => (r.Seller ?? "").toLowerCase().includes(seller));
+  // Owner 2026-06-29: show ALL contracts in range + their LC status (no longer
+  // filtered to LC_draft-blank). The "LC Draft Received" column carries the status
+  // (a date, or "No LC Draft" for the still-pending ones).
+  let rows = raw;
+  if (buyer) rows = rows.filter((r) => (r.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) rows = rows.filter((r) => (r.Seller ?? "").toLowerCase().includes(seller));
 
-  if (!pending.length) {
-    return { toolResult: { pending_total: 0, as_of_pkt: today, source: "Elithum portal", message: "No pending LCs match that buyer/seller and date range." } };
+  if (!rows.length) {
+    return { toolResult: { total: 0, as_of_pkt: today, source: "Elithum portal", message: "No contracts match that buyer/seller and date range." } };
   }
 
-  const derived = pending.map((r) => deriveRow(r, today));
+  const derived = rows.map((r) => deriveRow(r, today));
   derived.sort((a, b) => b.delayDays - a.delayDays); // overdue first
   const overdue = derived.filter((d) => d.delayDays > 0).length;
+  const noDraft = derived.filter((d) => d.pending).length;        // still awaiting LC draft
   const needsReview = derived.filter((d) => d.lcDueStatus === "none").length;
   const who = buyer ? ` ${derived[0].buyer}` : seller ? ` ${derived[0].seller}` : "";
-  const title = `Pending LCs${who} ${today}`.trim();
+  const title = `LC Status${who} ${today}`.trim();
 
   const r = await runMakeFile(admin, userId, { title, columns: PENDING_LC_COLUMNS, rows: derived.map(rowToCells) });
   const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
   if (base.error) return { toolResult: base }; // surface make_file failure verbatim
   return {
-    toolResult: { ...base, pending_total: derived.length, overdue, needs_review: needsReview, as_of_pkt: today, source: "Elithum portal" },
+    toolResult: { ...base, total: derived.length, no_lc_draft: noDraft, overdue, needs_review: needsReview, as_of_pkt: today, source: "Elithum portal" },
+    artifact: r.artifact,
+  };
+}
+
+// --- Pending Shipments (read-only Firestore, nested ips[].shipments[]) -----
+// Shipment data lives two levels deep, so we project the whole `ips` array (the LC
+// path's scalar `select` mask can't reach array sub-fields) and walk it in JS.
+const FS_FIELDS_SHIPMENTS = [...FS_FIELDS, "ips"];
+// Only these shipment keys are ever read — deliberately EXCLUDES `payments[]`
+// (amounts/swift/commission) so payment data never enters a sheet or the model.
+const SHIPMENT_KEYS = ["inv", "etd", "eta", "bl_number", "shipping_line", "bales", "qs", "shipment_status", "cDocs", "discrepancy_sent", "discrepancy_received"];
+
+// Recursive unwrap of a Firestore REST value (arrays + maps + every scalar type),
+// unlike the scalar-only fsUnwrap. Returns plain JS.
+// deno-lint-ignore no-explicit-any
+function fsDeep(v: any): unknown {
+  if (v == null) return null;
+  if ("stringValue" in v) return v.stringValue ?? "";
+  if ("integerValue" in v) return String(v.integerValue);
+  if ("doubleValue" in v) return String(v.doubleValue);
+  if ("timestampValue" in v) return v.timestampValue ?? "";
+  if ("booleanValue" in v) return v.booleanValue;
+  if ("nullValue" in v) return null;
+  if ("mapValue" in v) {
+    // deno-lint-ignore no-explicit-any
+    const out: any = {};
+    const fields = v.mapValue?.fields ?? {};
+    for (const k of Object.keys(fields)) out[k] = fsDeep(fields[k]);
+    return out;
+  }
+  if ("arrayValue" in v) return (v.arrayValue?.values ?? []).map(fsDeep);
+  return null;
+}
+
+type ContractWithShipments = { contract: RawContract; shipments: RawShipment[] };
+
+// Read `entries` (DoS-range scoped) WITH the nested ips[], and flatten each contract
+// into its shipment objects. Buyer/seller filtering happens in JS (as in the LC path).
+async function queryElithumWithShipments(dateFrom?: string, dateTo?: string): Promise<ContractWithShipments[]> {
+  const token = await elithumIdToken();
+  const filters: unknown[] = [];
+  if (dateFrom) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "GREATER_THAN_OR_EQUAL", value: { stringValue: dateFrom } } });
+  if (dateTo) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "LESS_THAN_OR_EQUAL", value: { stringValue: dateTo } } });
+  // deno-lint-ignore no-explicit-any
+  const structuredQuery: any = {
+    from: [{ collectionId: "entries" }],
+    select: { fields: FS_FIELDS_SHIPMENTS.map((f) => ({ fieldPath: f })) },
+    limit: 5000,
+  };
+  if (filters.length === 1) structuredQuery.where = filters[0];
+  else if (filters.length > 1) structuredQuery.where = { compositeFilter: { op: "AND", filters } };
+
+  const res = await fetch(`${FS_DOCS}:runQuery`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ structuredQuery }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`firestore ${res.status}`);
+  const rows = await res.json();
+  const out: ContractWithShipments[] = [];
+  let sawShipmentObj = false, sawKnownKey = false;
+  for (const r of rows ?? []) {
+    const doc = r.document;
+    if (!doc) continue;
+    const f = doc.fields ?? {};
+    // deno-lint-ignore no-explicit-any
+    const rec: any = {};
+    for (const k of FS_FIELDS) rec[k] = fsUnwrap(f[k]);
+    const ips = (fsDeep(f.ips) as { shipments?: unknown[] }[] | null) ?? [];
+    const shipments: RawShipment[] = [];
+    for (const ip of Array.isArray(ips) ? ips : []) {
+      const shs = Array.isArray(ip?.shipments) ? ip.shipments : [];
+      for (const sh of shs as Record<string, unknown>[]) {
+        if (!sh || typeof sh !== "object") continue;
+        sawShipmentObj = true;
+        // deno-lint-ignore no-explicit-any
+        const pick: any = {};
+        for (const k of SHIPMENT_KEYS) {
+          if (k in sh) { pick[k] = sh[k] == null ? "" : String(sh[k]); if (sh[k] !== undefined) sawKnownKey = true; }
+        }
+        // Payment Date from the nested payments[] — DATE ONLY (never amounts/swift,
+        // preserving the data-minimization rule). Every shipment has 0 or 1 payment;
+        // join defensively in case of multiples.
+        const pays = Array.isArray((sh as { payments?: unknown }).payments) ? (sh as { payments: unknown[] }).payments : [];
+        const payDates = pays
+          .map((p) => (p && typeof p === "object" ? String((p as Record<string, unknown>).payment_date ?? "") : ""))
+          .map((s) => s.trim()).filter(Boolean);
+        if (payDates.length) pick.payment_date = payDates.join(", ");
+        shipments.push(pick);
+      }
+    }
+    out.push({ contract: rec, shipments });
+  }
+  // schema guards (positive signal only): a non-empty contract result with no Contract
+  // anywhere, OR shipment objects that carry none of our known keys → drift. A result
+  // with simply zero shipments is VALID and must NOT trip this.
+  if (out.length && !out.some((c) => c.contract.Contract)) throw new Error("schema drift");
+  if (sawShipmentObj && !sawKnownKey) throw new Error("schema drift");
+  return out;
+}
+
+// Build the Pending-Shipments xlsx: one row per shipment (straight copy from Elithum),
+// scoped by Date of Sale. Cols 1-10 reuse the LC derivation; cols 11-17 are the shipment.
+async function runQueryElithumShipments(
+  admin: SupabaseClient,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+  pendingLc: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const dateFrom = (input?.date_from || pendingLc?.dateFrom || "") || undefined;
+  const dateTo = (input?.date_to || pendingLc?.dateTo || "") || undefined;
+  const buyer = String(input?.buyer ?? "").trim().toLowerCase();
+  const seller = String(input?.seller ?? "").trim().toLowerCase();
+
+  let raw: ContractWithShipments[];
+  try {
+    raw = await queryElithumWithShipments(dateFrom, dateTo);
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    if (/^auth|sign-in|40[13]/.test(msg)) return { toolResult: { error: "Couldn't sign in to Elithum (check the connection). Tell the user the Elithum connection failed; do NOT invent any contract data." } };
+    if (/schema drift/.test(msg)) return { toolResult: { error: "Elithum's data format changed unexpectedly; do NOT produce a sheet. Tell the user to check the Elithum integration." } };
+    return { toolResult: { error: `Couldn't reach Elithum (${msg}). Tell the user; do NOT invent contract data.` } };
+  }
+
+  const today = pktTodayISO(new Date());
+  let scoped = raw;
+  if (buyer) scoped = scoped.filter((c) => (c.contract.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) scoped = scoped.filter((c) => (c.contract.Seller ?? "").toLowerCase().includes(seller));
+
+  // Flatten: one row per real shipment (simple copy — contracts with no shipment
+  // produce no row). Track distinct contracts for honest counts (Eng F2).
+  const rows: ShipmentRow[] = [];
+  const contractsWithRows = new Set<string>();
+  const overdueContracts = new Set<string>();
+  for (const c of scoped) {
+    for (const sh of c.shipments) {
+      const row = deriveShipmentRow(c.contract, sh, today);
+      rows.push(row);
+      contractsWithRows.add(row.contract);
+      if (row.delayDays > 0) overdueContracts.add(row.contract);
+    }
+  }
+  if (!rows.length) {
+    return { toolResult: { rows: 0, as_of_pkt: today, source: "Elithum portal", message: "No shipments match that buyer/seller and date range." } };
+  }
+  rows.sort((a, b) => b.delayDays - a.delayDays); // overdue first (same signal as LC)
+  // Pre-truncate to the make_file cap so a wide range degrades gracefully (Eng F7).
+  const MAX = 5000;
+  const truncated = rows.length > MAX;
+  const finalRows = truncated ? rows.slice(0, MAX) : rows;
+
+  const who = buyer ? ` ${finalRows[0].buyer}` : seller ? ` ${finalRows[0].seller}` : "";
+  const title = `Pending Shipments${who} ${today}`.trim();
+  const r = await runMakeFile(admin, userId, { title, columns: PENDING_SHIPMENTS_COLUMNS, rows: finalRows.map(shipmentRowToCells) });
+  const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
+  if (base.error) return { toolResult: base };
+  return {
+    toolResult: {
+      ...base,
+      rows: finalRows.length,
+      contracts: contractsWithRows.size,
+      overdue_contracts: overdueContracts.size,
+      truncated,
+      as_of_pkt: today,
+      source: "Elithum portal",
+    },
+    artifact: r.artifact,
+  };
+}
+
+// --- Pending IPs (read-only Firestore, ips[] level) ------------------------
+// One row per IP. Needs contract scalars + the on-call `price` (for the "Price"
+// column fallback) + the nested ips[]. IP sub-fields are read via fsDeep.
+const FS_FIELDS_IPS = [...FS_FIELDS, "price", "ips"];
+const IP_KEYS = ["IP_number", "IP_start", "IP_end", "IP_quantity", "IP_sent"];
+
+type ContractWithIPs = { contract: RawContract; ips: RawIP[] };
+
+async function queryElithumWithIPs(dateFrom?: string, dateTo?: string): Promise<ContractWithIPs[]> {
+  const token = await elithumIdToken();
+  const filters: unknown[] = [];
+  if (dateFrom) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "GREATER_THAN_OR_EQUAL", value: { stringValue: dateFrom } } });
+  if (dateTo) filters.push({ fieldFilter: { field: { fieldPath: "DoS" }, op: "LESS_THAN_OR_EQUAL", value: { stringValue: dateTo } } });
+  // deno-lint-ignore no-explicit-any
+  const structuredQuery: any = {
+    from: [{ collectionId: "entries" }],
+    select: { fields: FS_FIELDS_IPS.map((f) => ({ fieldPath: f })) },
+    limit: 5000,
+  };
+  if (filters.length === 1) structuredQuery.where = filters[0];
+  else if (filters.length > 1) structuredQuery.where = { compositeFilter: { op: "AND", filters } };
+
+  const res = await fetch(`${FS_DOCS}:runQuery`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ structuredQuery }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`firestore ${res.status}`);
+  const rows = await res.json();
+  const out: ContractWithIPs[] = [];
+  let sawIpObj = false, sawKnownKey = false;
+  for (const r of rows ?? []) {
+    const doc = r.document;
+    if (!doc) continue;
+    const f = doc.fields ?? {};
+    // deno-lint-ignore no-explicit-any
+    const rec: any = {};
+    for (const k of FS_FIELDS) rec[k] = fsUnwrap(f[k]);
+    rec.price = fsUnwrap(f.price);
+    const ipsRaw = (fsDeep(f.ips) as Record<string, unknown>[] | null) ?? [];
+    const ips: RawIP[] = [];
+    for (const ip of Array.isArray(ipsRaw) ? ipsRaw : []) {
+      if (!ip || typeof ip !== "object") continue;
+      sawIpObj = true;
+      // deno-lint-ignore no-explicit-any
+      const pick: any = {};
+      for (const k of IP_KEYS) {
+        if (k in ip) { pick[k] = ip[k] == null ? "" : String(ip[k]); sawKnownKey = true; }
+      }
+      ips.push(pick);
+    }
+    out.push({ contract: rec, ips });
+  }
+  if (out.length && !out.some((c) => c.contract.Contract)) throw new Error("schema drift");
+  if (sawIpObj && !sawKnownKey) throw new Error("schema drift");
+  return out;
+}
+
+// Build the Pending-IPs xlsx: one row per IP (contracts with no IP produce no row).
+async function runQueryElithumIPs(
+  admin: SupabaseClient,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+  pendingLc: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const dateFrom = (input?.date_from || pendingLc?.dateFrom || "") || undefined;
+  const dateTo = (input?.date_to || pendingLc?.dateTo || "") || undefined;
+  const buyer = String(input?.buyer ?? "").trim().toLowerCase();
+  const seller = String(input?.seller ?? "").trim().toLowerCase();
+
+  let raw: ContractWithIPs[];
+  try {
+    raw = await queryElithumWithIPs(dateFrom, dateTo);
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    if (/^auth|sign-in|40[13]/.test(msg)) return { toolResult: { error: "Couldn't sign in to Elithum (check the connection). Tell the user the Elithum connection failed; do NOT invent any contract data." } };
+    if (/schema drift/.test(msg)) return { toolResult: { error: "Elithum's data format changed unexpectedly; do NOT produce a sheet. Tell the user to check the Elithum integration." } };
+    return { toolResult: { error: `Couldn't reach Elithum (${msg}). Tell the user; do NOT invent contract data.` } };
+  }
+
+  const today = pktTodayISO(new Date());
+  let scoped = raw;
+  if (buyer) scoped = scoped.filter((c) => (c.contract.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) scoped = scoped.filter((c) => (c.contract.Seller ?? "").toLowerCase().includes(seller));
+
+  const rows: IPRow[] = [];
+  const contractsWithRows = new Set<string>();
+  let notSent = 0;
+  for (const c of scoped) {
+    for (const ip of c.ips) {
+      const row = deriveIPRow(c.contract, ip);
+      rows.push(row);
+      contractsWithRows.add(row.contract);
+      if (!row.ipSent) notSent++;
+    }
+  }
+  if (!rows.length) {
+    return { toolResult: { rows: 0, as_of_pkt: today, source: "Elithum portal", message: "No IPs match that buyer/seller and date range." } };
+  }
+  rows.sort((a, b) => (b.ipStart || "").localeCompare(a.ipStart || "")); // newest IP first
+  const MAX = 5000;
+  const truncated = rows.length > MAX;
+  const finalRows = truncated ? rows.slice(0, MAX) : rows;
+
+  const who = buyer ? ` ${finalRows[0].buyer}` : seller ? ` ${finalRows[0].seller}` : "";
+  const title = `Pending IPs${who} ${today}`.trim();
+  const r = await runMakeFile(admin, userId, { title, columns: PENDING_IPS_COLUMNS, rows: finalRows.map(ipRowToCells) });
+  const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
+  if (base.error) return { toolResult: base };
+  return {
+    toolResult: {
+      ...base,
+      rows: finalRows.length,
+      contracts: contractsWithRows.size,
+      not_sent: notSent,
+      truncated,
+      as_of_pkt: today,
+      source: "Elithum portal",
+    },
+    artifact: r.artifact,
+  };
+}
+
+// Build the Pending-Docs xlsx: one row per shipment with document columns. Reuses
+// the shipments query (SHIPMENT_KEYS already include cDocs/discrepancy_*).
+async function runQueryElithumDocs(
+  admin: SupabaseClient,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+  pendingLc: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const dateFrom = (input?.date_from || pendingLc?.dateFrom || "") || undefined;
+  const dateTo = (input?.date_to || pendingLc?.dateTo || "") || undefined;
+  const buyer = String(input?.buyer ?? "").trim().toLowerCase();
+  const seller = String(input?.seller ?? "").trim().toLowerCase();
+
+  let raw: ContractWithShipments[];
+  try {
+    raw = await queryElithumWithShipments(dateFrom, dateTo);
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    if (/^auth|sign-in|40[13]/.test(msg)) return { toolResult: { error: "Couldn't sign in to Elithum (check the connection). Tell the user the Elithum connection failed; do NOT invent any contract data." } };
+    if (/schema drift/.test(msg)) return { toolResult: { error: "Elithum's data format changed unexpectedly; do NOT produce a sheet. Tell the user to check the Elithum integration." } };
+    return { toolResult: { error: `Couldn't reach Elithum (${msg}). Tell the user; do NOT invent contract data.` } };
+  }
+
+  const today = pktTodayISO(new Date());
+  let scoped = raw;
+  if (buyer) scoped = scoped.filter((c) => (c.contract.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) scoped = scoped.filter((c) => (c.contract.Seller ?? "").toLowerCase().includes(seller));
+
+  const rows: DocsRow[] = [];
+  const contractsWithRows = new Set<string>();
+  let withCopyDocs = 0;
+  for (const c of scoped) {
+    for (const sh of c.shipments) {
+      const row = deriveDocsRow(c.contract, sh);
+      rows.push(row);
+      contractsWithRows.add(row.contract);
+      if (row.copyDocs) withCopyDocs++;
+    }
+  }
+  if (!rows.length) {
+    return { toolResult: { rows: 0, as_of_pkt: today, source: "Elithum portal", message: "No shipments match that buyer/seller and date range." } };
+  }
+  rows.sort((a, b) => (b.etd || "").localeCompare(a.etd || "")); // most recent departure first
+  const MAX = 5000;
+  const truncated = rows.length > MAX;
+  const finalRows = truncated ? rows.slice(0, MAX) : rows;
+
+  const who = buyer ? ` ${finalRows[0].buyer}` : seller ? ` ${finalRows[0].seller}` : "";
+  const title = `Pending Docs${who} ${today}`.trim();
+  const r = await runMakeFile(admin, userId, { title, columns: PENDING_DOCS_COLUMNS, rows: finalRows.map(docsRowToCells) });
+  const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
+  if (base.error) return { toolResult: base };
+  return {
+    toolResult: {
+      ...base,
+      rows: finalRows.length,
+      contracts: contractsWithRows.size,
+      with_copy_docs: withCopyDocs,
+      truncated,
+      as_of_pkt: today,
+      source: "Elithum portal",
+    },
+    artifact: r.artifact,
+  };
+}
+
+// Build the Pending-Payments xlsx: Pending Docs + a Payment Date column. Reuses the
+// shipments query (payment_date is extracted there, date-only).
+async function runQueryElithumPayments(
+  admin: SupabaseClient,
+  userId: string,
+  // deno-lint-ignore no-explicit-any
+  input: any,
+  pendingLc: { dateFrom?: string | null; dateTo?: string | null; label?: string } | null,
+): Promise<{ toolResult: unknown; artifact?: { name: string; format: string; storagePath: string } }> {
+  const dateFrom = (input?.date_from || pendingLc?.dateFrom || "") || undefined;
+  const dateTo = (input?.date_to || pendingLc?.dateTo || "") || undefined;
+  const buyer = String(input?.buyer ?? "").trim().toLowerCase();
+  const seller = String(input?.seller ?? "").trim().toLowerCase();
+
+  let raw: ContractWithShipments[];
+  try {
+    raw = await queryElithumWithShipments(dateFrom, dateTo);
+  } catch (e) {
+    const msg = String(e instanceof Error ? e.message : e);
+    if (/^auth|sign-in|40[13]/.test(msg)) return { toolResult: { error: "Couldn't sign in to Elithum (check the connection). Tell the user the Elithum connection failed; do NOT invent any contract data." } };
+    if (/schema drift/.test(msg)) return { toolResult: { error: "Elithum's data format changed unexpectedly; do NOT produce a sheet. Tell the user to check the Elithum integration." } };
+    return { toolResult: { error: `Couldn't reach Elithum (${msg}). Tell the user; do NOT invent contract data.` } };
+  }
+
+  const today = pktTodayISO(new Date());
+  let scoped = raw;
+  if (buyer) scoped = scoped.filter((c) => (c.contract.Buyer ?? "").toLowerCase().includes(buyer));
+  if (seller) scoped = scoped.filter((c) => (c.contract.Seller ?? "").toLowerCase().includes(seller));
+
+  const rows: PaymentsRow[] = [];
+  const contractsWithRows = new Set<string>();
+  let withPayment = 0;
+  for (const c of scoped) {
+    for (const sh of c.shipments) {
+      const row = derivePaymentsRow(c.contract, sh);
+      rows.push(row);
+      contractsWithRows.add(row.contract);
+      if (row.paymentDate) withPayment++;
+    }
+  }
+  if (!rows.length) {
+    return { toolResult: { rows: 0, as_of_pkt: today, source: "Elithum portal", message: "No shipments match that buyer/seller and date range." } };
+  }
+  rows.sort((a, b) => (b.etd || "").localeCompare(a.etd || ""));
+  const MAX = 5000;
+  const truncated = rows.length > MAX;
+  const finalRows = truncated ? rows.slice(0, MAX) : rows;
+
+  const who = buyer ? ` ${finalRows[0].buyer}` : seller ? ` ${finalRows[0].seller}` : "";
+  const title = `Pending Payments${who} ${today}`.trim();
+  const r = await runMakeFile(admin, userId, { title, columns: PENDING_PAYMENTS_COLUMNS, rows: finalRows.map(paymentsRowToCells) });
+  const base = (r.toolResult && typeof r.toolResult === "object") ? r.toolResult as Record<string, unknown> : {};
+  if (base.error) return { toolResult: base };
+  return {
+    toolResult: {
+      ...base,
+      rows: finalRows.length,
+      contracts: contractsWithRows.size,
+      with_payment: withPayment,
+      truncated,
+      as_of_pkt: today,
+      source: "Elithum portal",
+    },
     artifact: r.artifact,
   };
 }

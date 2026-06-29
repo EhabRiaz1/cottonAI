@@ -2,7 +2,10 @@
 // Fixtures are REAL shipmentMonth strings captured from the Elithum `entries` collection.
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
-  computeDelay, computeLcDueDate, deriveRow, parseFirstShipment, pktTodayISO, rowToCells,
+  computeDelay, computeLcDueDate, deriveDocsRow, deriveIPRow, derivePaymentsRow, deriveRow,
+  deriveShipmentRow, docsRowToCells, ipRowToCells, parseFirstShipment, paymentsRowToCells,
+  PENDING_DOCS_COLUMNS, PENDING_IPS_COLUMNS, PENDING_PAYMENTS_COLUMNS, PENDING_SHIPMENTS_COLUMNS,
+  pktTodayISO, rowToCells, shipmentRowToCells,
 } from "./lc_derive.ts";
 
 Deno.test("parseFirstShipment — real formats → first month + year", () => {
@@ -97,6 +100,145 @@ Deno.test("deriveRow — draft received → not pending, delay 0", () => {
   assertEquals(r.lcDueDate, "2025-12-14");
   assertEquals(r.delayDays, 0);
   assertEquals(r.lcNumber, "1398LCS252744");
+});
+
+// --- Pending Shipments ----------------------------------------------------
+// Real shapes captured live from Elithum ips[].shipments[] on 2026-06-29.
+
+Deno.test("deriveShipmentRow — full shipment (real Contract 26/S/00962/A)", () => {
+  const today = "2026-06-29";
+  const contract = {
+    Contract: "26/S/00962/A", Buyer: "Sapphire Fibres Ltd", Seller: "OLAM", Growth: "USA M/E",
+    fixedPrice: "90", shipmentMonth: "Apr-26", DoS: "2026-01-10",
+    LC_draft: "2026-01-15", Trans_LC: "2026-01-20", LC_Num: "LC123",
+  };
+  const sh = {
+    inv: "05373/04/2026", etd: "2026-04-02", eta: "2026-06-06", bl_number: "265761856",
+    shipping_line: "MAERSK", bales: "1320", qs: "289.3800", shipment_status: "confirmed",
+  };
+  const r = deriveShipmentRow(contract, sh, today);
+  assertEquals(r.invoice, "05373/04/2026");
+  assertEquals(r.etd, "2026-04-02");
+  assertEquals(r.blNumber, "265761856");
+  assertEquals(r.bales, "1320");
+  assertEquals(r.shippedQtyMt, "289.3800");
+  assertEquals(r.shipmentStatus, "confirmed");
+  const cells = shipmentRowToCells(r);
+  assertEquals(cells.length, 17);
+  assertEquals(cells.length, PENDING_SHIPMENTS_COLUMNS.length);
+  assertEquals(cells[10], "05373/04/2026"); // Invoice # is col 11 (index 10)
+  assertEquals(cells[16], "289.3800");      // Shipped QTY (MT) is col 17
+});
+
+Deno.test("deriveShipmentRow — stray whitespace in shipping_line is trimmed", () => {
+  const r = deriveShipmentRow({ Contract: "X" }, { shipping_line: "\t COSCO " }, "2026-06-29");
+  assertEquals(r.shippingLine, "COSCO");
+});
+
+Deno.test("deriveShipmentRow — undefined shipment → blank shipment cells, cols 1-10 intact", () => {
+  const today = "2026-06-29";
+  const contract = {
+    Contract: "S51701.C01", Buyer: "Fazal Cloth", Seller: "Cargill", Growth: "Brazil BCI",
+    fixedPrice: "87.88", shipmentMonth: "Jun/Jul-26 SO", DoS: "2026-01-10",
+    LC_draft: "", Trans_LC: "", LC_Num: "",
+  };
+  const r = deriveShipmentRow(contract, undefined, today);
+  const cells = shipmentRowToCells(r);
+  // cols 11-17 blank
+  assertEquals(cells.slice(10), ["", "", "", "", "", "", ""]);
+  // cols 1-10 byte-identical to the LC derivation for the same contract
+  const lc = rowToCells(deriveRow(contract, today)); // [..., LC Draft Received(8), Trans(9), LC#(10), Delay(11)]
+  assertEquals(cells.slice(0, 7), lc.slice(0, 7));    // Contract..LC Due Date
+  assertEquals(cells[7], lc[8]);                      // Transmitted LC
+  assertEquals(cells[8], lc[9]);                      // LC Number
+  assertEquals(cells[9], lc[10]);                     // Delay
+  assertEquals(cells[6], "2026-05-17");               // LC Due Date derived
+  assertEquals(cells[9], "43");                       // Delay = 2026-05-17 → 2026-06-29
+});
+
+// --- Pending IPs ----------------------------------------------------------
+// Real shapes captured from Elithum ips[] on 2026-06-29.
+
+Deno.test("deriveIPRow — real IP (Contract 2645), fixedPrice used for Price", () => {
+  const r = deriveIPRow(
+    { Contract: "2645", Buyer: "Nishat Chunian", Seller: "UNITED", Growth: "Egypyian Giza",
+      fixedPrice: "107", price: "", shipmentMonth: "Prompt Shipment", Trans_LC: "2026-06-09", LC_Num: "1398LCS261114" },
+    { IP_number: "IP-KHI-FC3CFD/2026", IP_start: "2026-06-22", IP_end: "2026-08-22", IP_quantity: "136.50", IP_sent: "2026-06-22" },
+  );
+  const cells = ipRowToCells(r);
+  assertEquals(cells.length, 13);
+  assertEquals(cells.length, PENDING_IPS_COLUMNS.length);
+  assertEquals(cells, [
+    "2645", "Nishat Chunian", "UNITED", "Egypyian Giza", "107", "Prompt Shipment",
+    "2026-06-09", "1398LCS261114",
+    "IP-KHI-FC3CFD/2026", "2026-06-22", "2026-08-22", "136.50", "2026-06-22",
+  ]);
+});
+
+Deno.test("deriveIPRow — Price falls back to on-call price; NBSP in IP_number trimmed", () => {
+  const r = deriveIPRow(
+    { Contract: "S07777", fixedPrice: "", price: "725-ON-DEC-26" },
+    { IP_number: " IP-KHI-C308E2/2026", IP_quantity: "2200" },
+  );
+  assertEquals(r.price, "725-ON-DEC-26");          // fixedPrice blank → on-call price
+  assertEquals(r.ipNumber, "IP-KHI-C308E2/2026");  // leading NBSP stripped
+});
+
+Deno.test("deriveIPRow — undefined IP → blank IP cells, contract cells intact", () => {
+  const r = deriveIPRow({ Contract: "X", Buyer: "B", fixedPrice: "90" }, undefined);
+  assertEquals(ipRowToCells(r).slice(8), ["", "", "", "", ""]);
+  assertEquals(r.price, "90");
+});
+
+// --- Pending Docs ---------------------------------------------------------
+
+Deno.test("deriveDocsRow — real shipment with docs (Contract 26/S/00962/A)", () => {
+  const r = deriveDocsRow(
+    { Contract: "26/S/00962/A", Buyer: "Sapphire Fibres Ltd", Seller: "OLAM", Growth: "USA M/E",
+      fixedPrice: "90", shipmentMonth: "Apr-26", Trans_LC: "2026-01-20", LC_Num: "LC123" },
+    { inv: "05373/04/2026", etd: "2026-04-02", eta: "2026-06-06", bl_number: "265761856",
+      shipping_line: "MAERSK", bales: "1320", qs: "289.3800",
+      cDocs: "2026-04-09", discrepancy_sent: "2026-04-20", discrepancy_received: "2026-04-29" },
+  );
+  const cells = docsRowToCells(r);
+  assertEquals(cells.length, 18);
+  assertEquals(cells.length, PENDING_DOCS_COLUMNS.length);
+  assertEquals(cells.slice(0, 8), [
+    "26/S/00962/A", "Sapphire Fibres Ltd", "OLAM", "USA M/E", "90", "Apr-26", "2026-01-20", "LC123",
+  ]);
+  assertEquals(cells.slice(15), ["2026-04-09", "2026-04-20", "2026-04-29"]); // Copy Docs, Disc Sent, Disc Received
+});
+
+Deno.test("deriveDocsRow — shipment without discrepancies → those cells blank", () => {
+  const r = deriveDocsRow(
+    { Contract: "X" },
+    { inv: "705731", bl_number: "610000861", qs: "59.20", cDocs: "2026-01-30" },
+  );
+  assertEquals(r.copyDocs, "2026-01-30");
+  assertEquals(r.discSent, "");
+  assertEquals(r.discReceived, "");
+});
+
+// --- Pending Payments -----------------------------------------------------
+
+Deno.test("derivePaymentsRow — Docs columns + Payment Date (19 cols)", () => {
+  const c = { Contract: "224110", Buyer: "Nishat Chunian", Seller: "ECOM", Growth: "Brazil BCI",
+    fixedPrice: "85.75", shipmentMonth: "Aug/Sep-26 EQ", Trans_LC: "2026-01-08", LC_Num: "26INSU0201-00034" };
+  const sh = { inv: "705731", etd: "2026-01-22", eta: "2026-03-12", bl_number: "610000861",
+    shipping_line: "EVERGREEN", bales: "261", qs: "59.20", cDocs: "2026-01-30",
+    discrepancy_sent: "2026-02-12", discrepancy_received: "2026-02-23", payment_date: "2026-06-10" };
+  const cells = paymentsRowToCells(derivePaymentsRow(c, sh));
+  assertEquals(cells.length, 19);
+  assertEquals(cells.length, PENDING_PAYMENTS_COLUMNS.length);
+  assertEquals(PENDING_PAYMENTS_COLUMNS[18], "Payment Date");
+  // first 18 cells identical to the Docs row
+  assertEquals(cells.slice(0, 18), docsRowToCells(deriveDocsRow(c, sh)));
+  assertEquals(cells[18], "2026-06-10");
+});
+
+Deno.test("derivePaymentsRow — no payment → Payment Date blank", () => {
+  const r = derivePaymentsRow({ Contract: "X" }, { inv: "1", payment_date: "" });
+  assertEquals(paymentsRowToCells(r)[18], "");
 });
 
 Deno.test("pktTodayISO — formats a fixed instant in Asia/Karachi", () => {

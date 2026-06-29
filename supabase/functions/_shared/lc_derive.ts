@@ -9,7 +9,7 @@ const isBlank = (s?: string) => !s || !String(s).trim();
 
 export type RawContract = {
   Contract?: string; Buyer?: string; Seller?: string; Growth?: string;
-  fixedPrice?: string; shipmentMonth?: string; DoS?: string;
+  fixedPrice?: string; price?: string; shipmentMonth?: string; DoS?: string;
   LC_draft?: string; Trans_LC?: string; LC_Num?: string;
 };
 
@@ -125,6 +125,176 @@ export function rowToCells(r: DerivedRow): string[] {
     r.lcDueDate, r.lcDraftReceived, r.transmittedLc, r.lcNumber,
     r.delayDays > 0 ? String(r.delayDays) : "",
   ];
+}
+
+// --- Pending Shipments ----------------------------------------------------
+// The shipment columns live two levels deep in Elithum: contract.ips[].shipments[].
+// This stays PURE: the edge function flattens the Firestore doc into (contract,
+// shipment) pairs and hands us plain objects. Cols 1-10 reuse deriveRow verbatim so
+// LC Due Date / Delay / Transmitted LC / LC Number are byte-identical to the LC sheet.
+
+export type RawShipment = {
+  inv?: string; etd?: string; eta?: string; bl_number?: string;
+  shipping_line?: string; bales?: string; qs?: string; shipment_status?: string;
+  cDocs?: string; discrepancy_sent?: string; discrepancy_received?: string;
+  payment_date?: string;   // extracted from shipments[].payments[] (date only, never amounts)
+};
+
+export type ShipmentRow = DerivedRow & {
+  invoice: string; etd: string; eta: string; blNumber: string;
+  shippingLine: string; bales: string; shippedQtyMt: string;
+  shipmentStatus: string;            // for sort/colour only — NOT an output column
+};
+
+// Owner-specified 17 columns, exact order. NOTE: drops the LC sheet's
+// "LC Draft Received" column; everything else 1-10 mirrors the LC list.
+export const PENDING_SHIPMENTS_COLUMNS = [
+  "Contract#", "Buyer", "Seller", "Growth", "Fixed Price", "Shipment Month",
+  "LC Due Date", "Transmitted LC Received", "LC Number", "Delay (No. of Days)",
+  "Invoice #", "ETD", "ETA", "BL Number", "Shipping Line", "No. of Bales", "Shipped QTY (MT)",
+];
+
+// One (contract, shipment) pair → one row. `sh` undefined → blank shipment cells
+// (kept for callers that want a row even when a contract has no shipment).
+export function deriveShipmentRow(
+  contract: RawContract, sh: RawShipment | undefined, todayISO: string,
+): ShipmentRow {
+  const base = deriveRow(contract, todayISO);
+  return {
+    ...base,
+    invoice: (sh?.inv ?? "").trim(),
+    etd: (sh?.etd ?? "").trim(),
+    eta: (sh?.eta ?? "").trim(),
+    blNumber: (sh?.bl_number ?? "").trim(),
+    shippingLine: (sh?.shipping_line ?? "").trim(),   // data has stray tabs/spaces
+    bales: (sh?.bales ?? "").trim(),
+    shippedQtyMt: (sh?.qs ?? "").trim(),
+    shipmentStatus: (sh?.shipment_status ?? "").trim(),
+  };
+}
+
+export function shipmentRowToCells(r: ShipmentRow): string[] {
+  return [
+    r.contract, r.buyer, r.seller, r.growth, r.fixedPrice, r.shipmentMonth,
+    r.lcDueDate, r.transmittedLc, r.lcNumber, r.delayDays > 0 ? String(r.delayDays) : "",
+    r.invoice, r.etd, r.eta, r.blNumber, r.shippingLine, r.bales, r.shippedQtyMt,
+  ];
+}
+
+// --- Pending IPs ----------------------------------------------------------
+// IP-level report: one row per contract.ips[] entry (in practice 0 or 1 IP per
+// contract). No date derivation — just contract fields + IP fields, trimmed.
+// `.trim()` also strips the stray NBSP (U+00A0) seen on some IP_number values.
+
+export type RawIP = {
+  IP_number?: string; IP_start?: string; IP_end?: string; IP_quantity?: string; IP_sent?: string;
+};
+
+export type IPRow = {
+  contract: string; buyer: string; seller: string; growth: string; price: string;
+  shipmentMonth: string; transmittedLc: string; lcNumber: string;
+  ipNumber: string; ipStart: string; ipEnd: string; ipQuantity: string; ipSent: string;
+};
+
+export const PENDING_IPS_COLUMNS = [
+  "Contract#", "Buyer", "Seller", "Growth", "Price", "Shipment Month",
+  "Transmitted LC Received", "LC Number",
+  "IP Number", "IP Start", "IP End", "IP Quantity", "IP Sent to Supplier",
+];
+
+export function deriveIPRow(c: RawContract, ip: RawIP | undefined): IPRow {
+  return {
+    contract: (c.Contract ?? "").trim(),
+    buyer: (c.Buyer ?? "").trim(),
+    seller: (c.Seller ?? "").trim(),
+    growth: (c.Growth ?? "").trim(),
+    // "Price": fixed price if present, else the on-call price (e.g. "700 On Dec-26"),
+    // so on-call contracts aren't blank. (Switch to fixedPrice-only if owner prefers.)
+    price: ((c.fixedPrice ?? "").trim() || (c.price ?? "").trim()),
+    shipmentMonth: (c.shipmentMonth ?? "").trim(),
+    transmittedLc: (c.Trans_LC ?? "").trim(),
+    lcNumber: (c.LC_Num ?? "").trim(),
+    ipNumber: (ip?.IP_number ?? "").trim(),
+    ipStart: (ip?.IP_start ?? "").trim(),
+    ipEnd: (ip?.IP_end ?? "").trim(),
+    ipQuantity: (ip?.IP_quantity ?? "").trim(),
+    ipSent: (ip?.IP_sent ?? "").trim(),
+  };
+}
+
+export function ipRowToCells(r: IPRow): string[] {
+  return [
+    r.contract, r.buyer, r.seller, r.growth, r.price, r.shipmentMonth,
+    r.transmittedLc, r.lcNumber,
+    r.ipNumber, r.ipStart, r.ipEnd, r.ipQuantity, r.ipSent,
+  ];
+}
+
+// --- Pending Docs ---------------------------------------------------------
+// Shipment-level report (one row per shipment), like Pending Shipments but with
+// the document columns instead of LC Due Date / Delay. No date derivation.
+
+export type DocsRow = {
+  contract: string; buyer: string; seller: string; growth: string; fixedPrice: string;
+  shipmentMonth: string; transmittedLc: string; lcNumber: string;
+  invoice: string; etd: string; eta: string; blNumber: string; shippingLine: string;
+  bales: string; shippedQtyMt: string;
+  copyDocs: string; discSent: string; discReceived: string;
+};
+
+export const PENDING_DOCS_COLUMNS = [
+  "Contract#", "Buyer", "Seller", "Growth", "Fixed Price", "Shipment Month",
+  "Transmitted LC Received", "LC Number",
+  "Invoice #", "ETD", "ETA", "BL Number", "Shipping Line", "No. of Bales", "Shipped QTY (MT)",
+  "Copy Docs", "Disc Sent", "Disc Received",
+];
+
+export function deriveDocsRow(c: RawContract, sh: RawShipment | undefined): DocsRow {
+  return {
+    contract: (c.Contract ?? "").trim(),
+    buyer: (c.Buyer ?? "").trim(),
+    seller: (c.Seller ?? "").trim(),
+    growth: (c.Growth ?? "").trim(),
+    fixedPrice: (c.fixedPrice ?? "").trim(),
+    shipmentMonth: (c.shipmentMonth ?? "").trim(),
+    transmittedLc: (c.Trans_LC ?? "").trim(),
+    lcNumber: (c.LC_Num ?? "").trim(),
+    invoice: (sh?.inv ?? "").trim(),
+    etd: (sh?.etd ?? "").trim(),
+    eta: (sh?.eta ?? "").trim(),
+    blNumber: (sh?.bl_number ?? "").trim(),
+    shippingLine: (sh?.shipping_line ?? "").trim(),
+    bales: (sh?.bales ?? "").trim(),
+    shippedQtyMt: (sh?.qs ?? "").trim(),
+    copyDocs: (sh?.cDocs ?? "").trim(),
+    discSent: (sh?.discrepancy_sent ?? "").trim(),
+    discReceived: (sh?.discrepancy_received ?? "").trim(),
+  };
+}
+
+export function docsRowToCells(r: DocsRow): string[] {
+  return [
+    r.contract, r.buyer, r.seller, r.growth, r.fixedPrice, r.shipmentMonth,
+    r.transmittedLc, r.lcNumber,
+    r.invoice, r.etd, r.eta, r.blNumber, r.shippingLine, r.bales, r.shippedQtyMt,
+    r.copyDocs, r.discSent, r.discReceived,
+  ];
+}
+
+// --- Pending Payments -----------------------------------------------------
+// Identical to Pending Docs plus a "Payment Date" column (from the shipment's
+// single payment; every shipment has 0 or 1 payment in the data).
+
+export type PaymentsRow = DocsRow & { paymentDate: string };
+
+export const PENDING_PAYMENTS_COLUMNS = [...PENDING_DOCS_COLUMNS, "Payment Date"];
+
+export function derivePaymentsRow(c: RawContract, sh: RawShipment | undefined): PaymentsRow {
+  return { ...deriveDocsRow(c, sh), paymentDate: (sh?.payment_date ?? "").trim() };
+}
+
+export function paymentsRowToCells(r: PaymentsRow): string[] {
+  return [...docsRowToCells(r), r.paymentDate];
 }
 
 // IMPURE (reads the clock). Kept out of every function above. Asia/Karachi has no

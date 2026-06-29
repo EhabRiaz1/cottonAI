@@ -81,6 +81,20 @@ const LC_RANGE_OPTIONS: { label: string; years: number | null }[] = [
 // Detects a "Pending LC's list" style request so we route to Elithum, not the mailbox.
 const PENDING_LC_RE = /(pending\s*l\.?\/?c)|(\blc'?s?\b[^.]*\blist\b)|(letter\s+of\s+credit)/i;
 const PENDING_LC_PROMPT = "Make me a Pending LC's list";
+// Detects a "Pending Shipments list" request. Anchored on "pending" so ordinary
+// mailbox talk ("shipment list from the COFCO email") is NOT hijacked to Elithum.
+// Checked BEFORE PENDING_LC_RE so a dual-mention prompt still resolves deterministically.
+const PENDING_SHIP_RE = /(pending\s*shipments?)|(\bshipments?\s+(list|summary)\b[^.]*\bpending\b)|(\bpending\b[^.]*\bshipments?\s+(list|summary)\b)/i;
+const PENDING_SHIP_PROMPT = "Make me a Pending Shipments list";
+// Detects a "Pending IPs list" request (one row per IP). Anchored on "pending".
+const PENDING_IPS_RE = /(pending\s*ip'?s?\b)|(\bip'?s?\s+(list|summary)\b[^.]*\bpending\b)|(\bpending\b[^.]*\bip'?s?\s+(list|summary)\b)/i;
+const PENDING_IPS_PROMPT = "Make me a Pending IPs list";
+// Detects a "Pending Docs list" request (one row per shipment, with doc columns).
+const PENDING_DOCS_RE = /(pending\s*docs?)|(\bdocs?\s+(list|summary)\b[^.]*\bpending\b)|(\bpending\b[^.]*\bdocs?\s+(list|summary)\b)/i;
+const PENDING_DOCS_PROMPT = "Make me a Pending Docs list";
+// Detects a "Pending Payments list" request (one row per shipment + Payment Date).
+const PENDING_PAYMENTS_RE = /(pending\s*payments?)|(\bpayments?\s+(list|summary)\b[^.]*\bpending\b)|(\bpending\b[^.]*\bpayments?\s+(list|summary)\b)/i;
+const PENDING_PAYMENTS_PROMPT = "Make me a Pending Payments list";
 
 export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAdmin: boolean; userName?: string; orgId?: string | null }) {
   const [mode, setMode] = useState<"inbox" | "offers">("inbox");
@@ -106,9 +120,10 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   const [timeline, setTimeline] = useState<{ label: string; dateFrom: string | null } | null>(null);
   const [pendingMessages, setPendingMessages] = useState<ChatMsg[] | null>(null);
 
-  // Pending-LC clarification — its own state machine, separate from the mailbox
-  // timeline gate (a Pending-LC request must NOT trigger "how far back in your mailbox").
-  const [pendingLcAsk, setPendingLcAsk] = useState<ChatMsg[] | null>(null);
+  // Pending Elithum-report clarification — its own state machine, separate from the
+  // mailbox timeline gate (an Elithum request must NOT trigger "how far back in your
+  // mailbox"). `report` selects which sheet (LC vs Shipments); the date-range UX is shared.
+  const [pendingLcAsk, setPendingLcAsk] = useState<{ msgs: ChatMsg[]; report: "lc" | "shipments" | "ips" | "docs" | "payments" } | null>(null);
   const [lcCustom, setLcCustom] = useState(false);
   const [lcFrom, setLcFrom] = useState("");
   const [lcTo, setLcTo] = useState("");
@@ -295,7 +310,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   const runAgent = useCallback(async (
     msgs: ChatMsg[],
     tl: { label: string; dateFrom: string | null },
-    pendingLc?: { dateFrom: string | null; dateTo: string | null; label: string },
+    pendingLc?: { dateFrom: string | null; dateTo: string | null; label: string; report: "lc" | "shipments" | "ips" | "docs" | "payments" },
   ) => {
     setSending(true); setPreview(""); setChatErr(null);
     setInspectorOpen(true); setInspectorLabel(null); setInspectorCards([]);
@@ -336,8 +351,13 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
     setInput("");
     const next = [...messages, { role: "user" as const, content: text }];
     setMessages(next);
-    // Pending-LC request → ask the Date-of-Sale range (Elithum), bypass the mailbox timeline gate.
-    if (PENDING_LC_RE.test(text)) { setPendingLcAsk(next); setLcCustom(false); return; }
+    // Pending Elithum report → ask the Date-of-Sale range, bypass the mailbox timeline gate.
+    // Check the more specific reports BEFORE LC so a dual-mention prompt resolves deterministically.
+    if (PENDING_SHIP_RE.test(text)) { setPendingLcAsk({ msgs: next, report: "shipments" }); setLcCustom(false); return; }
+    if (PENDING_IPS_RE.test(text)) { setPendingLcAsk({ msgs: next, report: "ips" }); setLcCustom(false); return; }
+    if (PENDING_DOCS_RE.test(text)) { setPendingLcAsk({ msgs: next, report: "docs" }); setLcCustom(false); return; }
+    if (PENDING_PAYMENTS_RE.test(text)) { setPendingLcAsk({ msgs: next, report: "payments" }); setLcCustom(false); return; }
+    if (PENDING_LC_RE.test(text)) { setPendingLcAsk({ msgs: next, report: "lc" }); setLcCustom(false); return; }
     // Otherwise: first prompt of a thread → ask the mailbox timeline.
     if (!timeline) setPendingMessages(next);
     else void runAgent(next, timeline);
@@ -352,22 +372,22 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   }, [pendingMessages, runAgent]);
 
   const todayISO = () => new Date().toISOString().slice(0, 10);
-  const runPendingLc = useCallback((pend: ChatMsg[], dateFrom: string | null, dateTo: string, label: string) => {
+  const runPendingLc = useCallback((pend: ChatMsg[], report: "lc" | "shipments" | "ips" | "docs" | "payments", dateFrom: string | null, dateTo: string, label: string) => {
     setPendingLcAsk(null); setLcCustom(false);
-    // Pending-LC bypasses the mailbox timeline entirely (it queries Elithum Date-of-Sale).
-    void runAgent(pend, { label: "", dateFrom: null }, { dateFrom, dateTo, label });
+    // Bypasses the mailbox timeline entirely (it queries Elithum Date-of-Sale).
+    void runAgent(pend, { label: "", dateFrom: null }, { dateFrom, dateTo, label, report });
   }, [runAgent]);
 
   const chooseLcRange = useCallback((years: number | null) => {
-    const pend = pendingLcAsk; if (!pend) return;
+    const ask = pendingLcAsk; if (!ask) return;
     if (years == null) { setLcCustom(true); return; } // reveal custom date inputs (the "type your own" path)
     const d = new Date(); d.setFullYear(d.getFullYear() - years);
-    runPendingLc(pend, d.toISOString().slice(0, 10), todayISO(), `Last ${years} year${years > 1 ? "s" : ""}`);
+    runPendingLc(ask.msgs, ask.report, d.toISOString().slice(0, 10), todayISO(), `Last ${years} year${years > 1 ? "s" : ""}`);
   }, [pendingLcAsk, runPendingLc]);
 
   const chooseLcCustom = useCallback(() => {
-    const pend = pendingLcAsk; if (!pend || !lcFrom || !lcTo) return;
-    runPendingLc(pend, lcFrom, lcTo, `${lcFrom} → ${lcTo}`);
+    const ask = pendingLcAsk; if (!ask || !lcFrom || !lcTo) return;
+    runPendingLc(ask.msgs, ask.report, lcFrom, lcTo, `${lcFrom} → ${lcTo}`);
   }, [pendingLcAsk, lcFrom, lcTo, runPendingLc]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, preview]);
@@ -546,6 +566,22 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
                     onClick={() => { setInput(PENDING_LC_PROMPT + " for "); inputRef.current?.focus(); }}>
                     📋 Pending LC's list
                   </button>
+                  <button className="scope-option" style={{ width: "auto", display: "inline-block" }}
+                    onClick={() => { setInput(PENDING_SHIP_PROMPT + " for "); inputRef.current?.focus(); }}>
+                    📦 Pending Shipments list
+                  </button>
+                  <button className="scope-option" style={{ width: "auto", display: "inline-block" }}
+                    onClick={() => { setInput(PENDING_IPS_PROMPT + " for "); inputRef.current?.focus(); }}>
+                    📑 Pending IP's list
+                  </button>
+                  <button className="scope-option" style={{ width: "auto", display: "inline-block" }}
+                    onClick={() => { setInput(PENDING_DOCS_PROMPT + " for "); inputRef.current?.focus(); }}>
+                    🗂 Pending Docs list
+                  </button>
+                  <button className="scope-option" style={{ width: "auto", display: "inline-block" }}
+                    onClick={() => { setInput(PENDING_PAYMENTS_PROMPT + " for "); inputRef.current?.focus(); }}>
+                    💵 Pending Payments list
+                  </button>
                 </div>
               </div>
             )}
@@ -618,7 +654,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
                 <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
                 <div style={aiBubble}>
-                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 4 }}>Pending LC's list — what date range?</div>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 4 }}>{pendingLcAsk.report === "shipments" ? "Pending Shipments list" : pendingLcAsk.report === "ips" ? "Pending IP's list" : pendingLcAsk.report === "docs" ? "Pending Docs list" : pendingLcAsk.report === "payments" ? "Pending Payments list" : "Pending LC's list"} — what date range?</div>
                   <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>By Date of Sale in Elithum.</div>
                   {!lcCustom ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
