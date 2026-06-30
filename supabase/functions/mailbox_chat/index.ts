@@ -124,10 +124,11 @@ Deno.serve(async (req: Request) => {
 
   type Msg = { role: "user" | "assistant"; content: string };
   type PendingLc = { dateFrom?: string | null; dateTo?: string | null; label?: string; report?: "lc" | "shipments" | "ips" | "docs" | "payments" };
-  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; timelineLabel?: string; pendingLc?: PendingLc | null } = {};
+  let body: { messages?: Msg[]; emailId?: string | null; scope?: "email" | "global"; dateFrom?: string | null; dateTo?: string | null; timelineLabel?: string; pendingLc?: PendingLc | null } = {};
   try { body = await req.json(); } catch { return j({ error: "Invalid JSON" }, 400); }
   const pendingLc = body.pendingLc && typeof body.pendingLc === "object" ? body.pendingLc : null;
   const dateFrom = typeof body.dateFrom === "string" && body.dateFrom ? body.dateFrom : null;
+  const dateTo = typeof body.dateTo === "string" && body.dateTo ? body.dateTo : null;
   const timelineLabel = body.timelineLabel || (dateFrom ? `since ${dateFrom}` : "entire mailbox");
   const clientMessages = (body.messages ?? []).filter((m) => m.role === "user" || m.role === "assistant");
   if (!clientMessages.length) return j({ error: "messages required" }, 400);
@@ -205,8 +206,13 @@ Deno.serve(async (req: Request) => {
 
   for (const m of clientMessages) messages.push({ role: m.role, content: m.content });
 
-  const timelineNote = scope === "email" ? "" : (dateFrom
-    ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nONLY consider offers dated on or after ${dateFrom}. Pass date_from:"${dateFrom}" to search_offers and search the FULL range EXHAUSTIVELY with a high limit (e.g. 300). Do NOT base a broad answer on a single document or only the most recent offers.`
+  const timelineNote = scope === "email" ? "" : (dateFrom && dateTo
+    // Bounded window (custom range): force BOTH bounds on every search_offers call. The
+    // open-ended wording below ("FULL range / not only recent") would otherwise let the
+    // model drift past the upper bound, so this branch states "inside this window only".
+    ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nConsider ONLY offers with offer_date between ${dateFrom} and ${dateTo}, inclusive. EVERY call to search_offers MUST pass BOTH date_from:"${dateFrom}" AND date_to:"${dateTo}" — never omit the upper bound. Use a high limit (e.g. 300) to retrieve every offer inside this window, but do NOT look outside it. If no offers fall inside this window, say so plainly and state the window dates; do NOT widen the range, fall back to other dates, or infer prices from outside it.`
+    : dateFrom
+    ? `\n\n## Timeline scope (user-selected: ${timelineLabel})\nONLY consider offers dated on or after ${dateFrom} (this is a calendar-day window, not a rolling clock). Pass date_from:"${dateFrom}" to search_offers and search the FULL range EXHAUSTIVELY with a high limit (e.g. 300). Do NOT base a broad answer on a single document or only the most recent offers. If no offers fall on or after ${dateFrom}, say so plainly; do NOT widen the range or infer prices from older offers.`
     : `\n\n## Timeline scope (user-selected: entire mailbox)\nSearch comprehensively across ALL brokers and dates — call search_offers with a high limit (e.g. 400) and review the whole pool. Do NOT answer a broad question from a single document or only the most recent offers.`);
   const pendingReport = pendingLc?.report === "shipments"
     ? "shipments"
@@ -223,7 +229,7 @@ Deno.serve(async (req: Request) => {
       : pendingReport === "ips"
       ? `\n\n## PENDING IPs REQUEST (priority)\nThe user asked for a Pending IPs list from the Elithum portal (one row per IP). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many IPs across how many contracts, and how many have not been sent to the supplier yet (not_sent). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
       : pendingReport === "docs"
-      ? `\n\n## PENDING DOCS REQUEST (priority)\nThe user asked for a Pending Docs list from the Elithum portal (one row per shipment, with document columns: Copy Docs, Disc Sent, Disc Received). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many have copy docs recorded (with_copy_docs). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
+      ? `\n\n## PENDING DOCS REQUEST (priority)\nThe user asked for a Pending Docs list from the Elithum portal (one row per shipment, with document columns: Original Docs, Copy Docs, Disc Sent, Disc Received). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many have copy docs recorded (with_copy_docs). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
       : pendingReport === "payments"
       ? `\n\n## PENDING PAYMENTS REQUEST (priority)\nThe user asked for a Pending Payments list from the Elithum portal (one row per shipment; same as Pending Docs plus a Payment Date column). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many shipment rows across how many contracts, and how many have a payment date recorded (with_payment). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`
       : `\n\n## PENDING LC REQUEST (priority)\nThe user asked for a Pending LC's list from the Elithum portal. This report now lists ALL contracts in the date range with their LC status (not just the ones missing an LC draft). Call the \`query_elithum\` tool EXACTLY ONCE with date_from="${pendingLc.dateFrom ?? ""}", date_to="${pendingLc.dateTo ?? ""}", and set buyer/seller ONLY if the user named one in their message (otherwise omit them). Do NOT call make_file, search_offers, or web_search for this. After the tool returns, write 2-3 sentences: how many contracts total, how many still have no LC draft (no_lc_draft), and how many are overdue (Delay > 0). The downloadable Excel is generated automatically — do NOT re-list every row. If the tool returns an \`error\`, tell the user plainly and never invent contract data.`)
@@ -612,7 +618,7 @@ async function runQueryElithum(
 const FS_FIELDS_SHIPMENTS = [...FS_FIELDS, "ips"];
 // Only these shipment keys are ever read — deliberately EXCLUDES `payments[]`
 // (amounts/swift/commission) so payment data never enters a sheet or the model.
-const SHIPMENT_KEYS = ["inv", "etd", "eta", "bl_number", "shipping_line", "bales", "qs", "shipment_status", "cDocs", "discrepancy_sent", "discrepancy_received"];
+const SHIPMENT_KEYS = ["inv", "etd", "eta", "bl_number", "shipping_line", "bales", "qs", "shipment_status", "oDocs", "cDocs", "discrepancy_sent", "discrepancy_received"];
 
 // Recursive unwrap of a Firestore REST value (arrays + maps + every scalar type),
 // unlike the scalar-only fsUnwrap. Returns plain JS.

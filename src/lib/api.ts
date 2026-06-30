@@ -163,6 +163,7 @@ export async function streamMailboxChat(
     emailId?: string | null;
     scope?: "email" | "global";
     dateFrom?: string | null;
+    dateTo?: string | null;
     timelineLabel?: string;
     pendingLc?: { dateFrom?: string | null; dateTo?: string | null; label?: string; report?: "lc" | "shipments" | "ips" | "docs" | "payments" } | null;
   },

@@ -63,12 +63,22 @@ function transcriptText(msgs: ChatMsg[], cap = 1500): string {
 }
 const shareWhatsAppText = (text: string) => window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, "_blank");
 
-const SCOPE_OPTIONS: { label: string; days: number | null }[] = [
-  { label: "Last 7 days", days: 7 },
-  { label: "Last 30 days", days: 30 },
-  { label: "Last 90 days", days: 90 },
-  { label: "Entire mailbox", days: null },
+// Mailbox timeline presets. `kind` disambiguates the three behaviours that used to be
+// overloaded onto `days: number | null`: bounded hour-windows, the custom date-range
+// reveal, and the whole-mailbox catch-all.
+type ScopeOption = { label: string; kind: "hours" | "custom" | "all"; days?: number };
+const SCOPE_OPTIONS: ScopeOption[] = [
+  { label: "Last 24 hours", kind: "hours", days: 1 },
+  { label: "Last 48 hours", kind: "hours", days: 2 },
+  { label: "Last 72 hours", kind: "hours", days: 3 },
+  { label: "Custom date range…", kind: "custom" },
+  { label: "Entire mailbox", kind: "all" },
 ];
+// offer_date is a calendar-day DATE, so windows are day-granular. An N-day window means
+// the last N calendar days INCLUSIVE of today → offset (N-1): 24h→today, 48h→2 days, 72h→3.
+const daysToDateFrom = (days: number) =>
+  new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+const todayISODate = () => new Date().toISOString().slice(0, 10);
 
 // Pending-LC list: the agent pulls contracts from the Elithum portal. We ask the
 // Date-of-Sale window as a claude.ai-style multiple choice (D = custom range).
@@ -117,8 +127,13 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   const endRef = useRef<HTMLDivElement>(null);
 
   // Timeline scope — asked as a multiple-choice question before the first answer.
-  const [timeline, setTimeline] = useState<{ label: string; dateFrom: string | null } | null>(null);
+  const [timeline, setTimeline] = useState<{ label: string; dateFrom: string | null; dateTo: string | null } | null>(null);
   const [pendingMessages, setPendingMessages] = useState<ChatMsg[] | null>(null);
+  // Custom-range reveal for the mailbox timeline gate (separate toggle so picking
+  // "Custom date range…" defers the run while the user fills in the dates).
+  const [scopeCustom, setScopeCustom] = useState(false);
+  const [scopeFrom, setScopeFrom] = useState("");
+  const [scopeTo, setScopeTo] = useState(todayISODate); // prefill To = today (common "from X until now")
 
   // Pending Elithum-report clarification — its own state machine, separate from the
   // mailbox timeline gate (an Elithum request must NOT trigger "how far back in your
@@ -292,6 +307,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
   const newChat = useCallback(() => {
     setMessages([]); setPreview(""); setChatErr(null);
     setTimeline(null); setPendingMessages(null);
+    setScopeCustom(false); setScopeFrom(""); setScopeTo(todayISODate());
     setPendingLcAsk(null); setLcCustom(false);
     setInspectorOpen(false); setInspectorCards([]); setInspectorLabel(null);
     currentChatIdRef.current = null; setCurrentChatId(null); setHistoryOpen(false);
@@ -309,7 +325,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
 
   const runAgent = useCallback(async (
     msgs: ChatMsg[],
-    tl: { label: string; dateFrom: string | null },
+    tl: { label: string; dateFrom: string | null; dateTo: string | null },
     pendingLc?: { dateFrom: string | null; dateTo: string | null; label: string; report: "lc" | "shipments" | "ips" | "docs" | "payments" },
   ) => {
     setSending(true); setPreview(""); setChatErr(null);
@@ -321,7 +337,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
       let acc = "";
       let finalSources: SourceCard[] = [];
       const artifacts: MailboxArtifact[] = [];
-      await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, timelineLabel: tl.label, pendingLc: pendingLc ?? null }, (ev: MailboxEvent) => {
+      await streamMailboxChat(token, { messages: msgs, emailId: selectedId, scope, dateFrom: tl.dateFrom, dateTo: tl.dateTo, timelineLabel: tl.label, pendingLc: pendingLc ?? null }, (ev: MailboxEvent) => {
         if (ev.t === "tok") { acc += ev.v; setPreview(acc); }
         else if (ev.t === "act") {
           if (ev.label) setInspectorLabel(ev.label);
@@ -363,19 +379,31 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
     else void runAgent(next, timeline);
   }, [input, sending, messages, timeline, pendingMessages, pendingLcAsk, runAgent]);
 
-  const chooseScope = useCallback((label: string, days: number | null) => {
-    const dateFrom = days == null ? null : new Date(Date.now() - days * 86_400_000).toISOString().slice(0, 10);
-    const tl = { label, dateFrom };
+  const chooseScope = useCallback((opt: ScopeOption) => {
+    // "Custom" reveals the date pickers and DEFERS the run (keep pendingMessages so the
+    // gate bubble stays and Generate has messages to send). Mirrors chooseLcRange's
+    // early-return for the custom path.
+    if (opt.kind === "custom") { setScopeCustom(true); return; }
+    const dateFrom = opt.kind === "hours" && opt.days != null ? daysToDateFrom(opt.days) : null;
+    const tl = { label: opt.label, dateFrom, dateTo: null };
     setTimeline(tl);
     const pend = pendingMessages; setPendingMessages(null);
     if (pend) void runAgent(pend, tl);
   }, [pendingMessages, runAgent]);
 
+  const chooseScopeCustom = useCallback(() => {
+    if (!scopeFrom || !scopeTo || scopeFrom > scopeTo) return; // guard: both set, from <= to
+    const tl = { label: `${scopeFrom} → ${scopeTo}`, dateFrom: scopeFrom, dateTo: scopeTo };
+    setTimeline(tl); setScopeCustom(false);
+    const pend = pendingMessages; setPendingMessages(null);
+    if (pend) void runAgent(pend, tl);
+  }, [scopeFrom, scopeTo, pendingMessages, runAgent]);
+
   const todayISO = () => new Date().toISOString().slice(0, 10);
   const runPendingLc = useCallback((pend: ChatMsg[], report: "lc" | "shipments" | "ips" | "docs" | "payments", dateFrom: string | null, dateTo: string, label: string) => {
     setPendingLcAsk(null); setLcCustom(false);
     // Bypasses the mailbox timeline entirely (it queries Elithum Date-of-Sale).
-    void runAgent(pend, { label: "", dateFrom: null }, { dateFrom, dateTo, label, report });
+    void runAgent(pend, { label: "", dateFrom: null, dateTo: null }, { dateFrom, dateTo, label, report });
   }, [runAgent]);
 
   const chooseLcRange = useCallback((years: number | null) => {
@@ -639,14 +667,33 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", marginBottom: 16, width: "100%" }}>
                 <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 4 }}>Cotton AI</div>
                 <div style={aiBubble}>
-                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 10 }}>How far back should I look?</div>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {SCOPE_OPTIONS.map((o) => (
-                      <button key={o.label} className="scope-option" onClick={() => chooseScope(o.label, o.days)}>
-                        {o.label}
-                      </button>
-                    ))}
-                  </div>
+                  <div style={{ fontSize: 14.5, fontWeight: 600, marginBottom: 4 }}>How far back should I look?</div>
+                  <div style={{ fontSize: 12, opacity: 0.65, marginBottom: 10 }}>Windows are by calendar day.</div>
+                  {!scopeCustom ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {SCOPE_OPTIONS.map((o) => (
+                        <button key={o.label} className="scope-option" onClick={() => chooseScope(o)}>
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <label style={{ fontSize: 12, opacity: 0.8 }}>From
+                        <input type="date" value={scopeFrom} max={scopeTo || undefined} onChange={(e) => setScopeFrom(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+                      </label>
+                      <label style={{ fontSize: 12, opacity: 0.8 }}>To
+                        <input type="date" value={scopeTo} min={scopeFrom || undefined} onChange={(e) => setScopeTo(e.target.value)} style={{ ...inp, marginTop: 4 }} />
+                      </label>
+                      {scopeFrom && scopeTo && scopeFrom > scopeTo && (
+                        <span style={{ fontSize: 11, color: RED }}>End date must be on or after the start date.</span>
+                      )}
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button className="btn btn-primary" disabled={!scopeFrom || !scopeTo || scopeFrom > scopeTo} onClick={chooseScopeCustom}>Search</button>
+                        <button className="scope-option" style={{ width: "auto" }} onClick={() => setScopeCustom(false)}>← Back</button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -701,7 +748,7 @@ export function MailboxView({ isPlatformAdmin, userName, orgId }: { isPlatformAd
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 20, background: "rgba(200,169,110,0.12)", border: "1px solid rgba(200,169,110,0.28)" }}>
                   🕑 {timeline.label}
                 </span>
-                <button onClick={() => setTimeline(null)} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", textDecoration: "underline", opacity: 0.65, fontSize: 11 }}>change</button>
+                <button onClick={() => { setTimeline(null); setScopeCustom(false); }} style={{ background: "none", border: "none", color: "inherit", cursor: "pointer", textDecoration: "underline", opacity: 0.65, fontSize: 11 }}>change</button>
               </div>
             )}
             <div style={{ display: "flex", gap: 8 }}>

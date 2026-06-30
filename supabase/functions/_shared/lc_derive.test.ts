@@ -198,15 +198,16 @@ Deno.test("deriveDocsRow — real shipment with docs (Contract 26/S/00962/A)", (
       fixedPrice: "90", shipmentMonth: "Apr-26", Trans_LC: "2026-01-20", LC_Num: "LC123" },
     { inv: "05373/04/2026", etd: "2026-04-02", eta: "2026-06-06", bl_number: "265761856",
       shipping_line: "MAERSK", bales: "1320", qs: "289.3800",
-      cDocs: "2026-04-09", discrepancy_sent: "2026-04-20", discrepancy_received: "2026-04-29" },
+      oDocs: "2026-04-05", cDocs: "2026-04-09", discrepancy_sent: "2026-04-20", discrepancy_received: "2026-04-29" },
   );
   const cells = docsRowToCells(r);
-  assertEquals(cells.length, 18);
+  assertEquals(cells.length, 19);
   assertEquals(cells.length, PENDING_DOCS_COLUMNS.length);
   assertEquals(cells.slice(0, 8), [
     "26/S/00962/A", "Sapphire Fibres Ltd", "OLAM", "USA M/E", "90", "Apr-26", "2026-01-20", "LC123",
   ]);
-  assertEquals(cells.slice(15), ["2026-04-09", "2026-04-20", "2026-04-29"]); // Copy Docs, Disc Sent, Disc Received
+  // Original Docs, Copy Docs, Disc Sent, Disc Received
+  assertEquals(cells.slice(15), ["2026-04-05", "2026-04-09", "2026-04-20", "2026-04-29"]);
 });
 
 Deno.test("deriveDocsRow — shipment without discrepancies → those cells blank", () => {
@@ -214,6 +215,7 @@ Deno.test("deriveDocsRow — shipment without discrepancies → those cells blan
     { Contract: "X" },
     { inv: "705731", bl_number: "610000861", qs: "59.20", cDocs: "2026-01-30" },
   );
+  assertEquals(r.originalDocs, ""); // no oDocs in this shipment → blank
   assertEquals(r.copyDocs, "2026-01-30");
   assertEquals(r.discSent, "");
   assertEquals(r.discReceived, "");
@@ -221,24 +223,24 @@ Deno.test("deriveDocsRow — shipment without discrepancies → those cells blan
 
 // --- Pending Payments -----------------------------------------------------
 
-Deno.test("derivePaymentsRow — Docs columns + Payment Date (19 cols)", () => {
+Deno.test("derivePaymentsRow — Docs columns + Payment Date (20 cols)", () => {
   const c = { Contract: "224110", Buyer: "Nishat Chunian", Seller: "ECOM", Growth: "Brazil BCI",
     fixedPrice: "85.75", shipmentMonth: "Aug/Sep-26 EQ", Trans_LC: "2026-01-08", LC_Num: "26INSU0201-00034" };
   const sh = { inv: "705731", etd: "2026-01-22", eta: "2026-03-12", bl_number: "610000861",
-    shipping_line: "EVERGREEN", bales: "261", qs: "59.20", cDocs: "2026-01-30",
+    shipping_line: "EVERGREEN", bales: "261", qs: "59.20", oDocs: "2026-01-26", cDocs: "2026-01-30",
     discrepancy_sent: "2026-02-12", discrepancy_received: "2026-02-23", payment_date: "2026-06-10" };
   const cells = paymentsRowToCells(derivePaymentsRow(c, sh));
-  assertEquals(cells.length, 19);
+  assertEquals(cells.length, 20);
   assertEquals(cells.length, PENDING_PAYMENTS_COLUMNS.length);
-  assertEquals(PENDING_PAYMENTS_COLUMNS[18], "Payment Date");
-  // first 18 cells identical to the Docs row
-  assertEquals(cells.slice(0, 18), docsRowToCells(deriveDocsRow(c, sh)));
-  assertEquals(cells[18], "2026-06-10");
+  assertEquals(PENDING_PAYMENTS_COLUMNS[19], "Payment Date");
+  // first 19 cells identical to the Docs row
+  assertEquals(cells.slice(0, 19), docsRowToCells(deriveDocsRow(c, sh)));
+  assertEquals(cells[19], "2026-06-10");
 });
 
 Deno.test("derivePaymentsRow — no payment → Payment Date blank", () => {
   const r = derivePaymentsRow({ Contract: "X" }, { inv: "1", payment_date: "" });
-  assertEquals(paymentsRowToCells(r)[18], "");
+  assertEquals(paymentsRowToCells(r)[19], "");
 });
 
 Deno.test("pktTodayISO — formats a fixed instant in Asia/Karachi", () => {

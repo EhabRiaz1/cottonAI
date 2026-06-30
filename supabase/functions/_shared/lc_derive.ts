@@ -136,7 +136,7 @@ export function rowToCells(r: DerivedRow): string[] {
 export type RawShipment = {
   inv?: string; etd?: string; eta?: string; bl_number?: string;
   shipping_line?: string; bales?: string; qs?: string; shipment_status?: string;
-  cDocs?: string; discrepancy_sent?: string; discrepancy_received?: string;
+  oDocs?: string; cDocs?: string; discrepancy_sent?: string; discrepancy_received?: string;
   payment_date?: string;   // extracted from shipments[].payments[] (date only, never amounts)
 };
 
@@ -239,14 +239,14 @@ export type DocsRow = {
   shipmentMonth: string; transmittedLc: string; lcNumber: string;
   invoice: string; etd: string; eta: string; blNumber: string; shippingLine: string;
   bales: string; shippedQtyMt: string;
-  copyDocs: string; discSent: string; discReceived: string;
+  originalDocs: string; copyDocs: string; discSent: string; discReceived: string;
 };
 
 export const PENDING_DOCS_COLUMNS = [
   "Contract#", "Buyer", "Seller", "Growth", "Fixed Price", "Shipment Month",
   "Transmitted LC Received", "LC Number",
   "Invoice #", "ETD", "ETA", "BL Number", "Shipping Line", "No. of Bales", "Shipped QTY (MT)",
-  "Copy Docs", "Disc Sent", "Disc Received",
+  "Original Docs", "Copy Docs", "Disc Sent", "Disc Received",
 ];
 
 export function deriveDocsRow(c: RawContract, sh: RawShipment | undefined): DocsRow {
@@ -266,6 +266,7 @@ export function deriveDocsRow(c: RawContract, sh: RawShipment | undefined): Docs
     shippingLine: (sh?.shipping_line ?? "").trim(),
     bales: (sh?.bales ?? "").trim(),
     shippedQtyMt: (sh?.qs ?? "").trim(),
+    originalDocs: (sh?.oDocs ?? "").trim(),
     copyDocs: (sh?.cDocs ?? "").trim(),
     discSent: (sh?.discrepancy_sent ?? "").trim(),
     discReceived: (sh?.discrepancy_received ?? "").trim(),
@@ -277,7 +278,7 @@ export function docsRowToCells(r: DocsRow): string[] {
     r.contract, r.buyer, r.seller, r.growth, r.fixedPrice, r.shipmentMonth,
     r.transmittedLc, r.lcNumber,
     r.invoice, r.etd, r.eta, r.blNumber, r.shippingLine, r.bales, r.shippedQtyMt,
-    r.copyDocs, r.discSent, r.discReceived,
+    r.originalDocs, r.copyDocs, r.discSent, r.discReceived,
   ];
 }
 
