@@ -55,7 +55,17 @@ Deno.serve(async (req: Request) => {
     });
   }
 
-  type Body = { email: string; password: string; orgName: string; notes?: string };
+  type Body = {
+    email: string;
+    password: string;
+    orgName: string;
+    notes?: string;
+    // Optional per-account feature gating. e.g. ["chat", "mailbox"] hides
+    // those features from the account (used for test / integration-partner
+    // accounts that should only see a restricted UI).
+    hiddenFeatures?: string[];
+    settings?: Record<string, unknown>;
+  };
   let body: Body;
   try {
     body = (await req.json()) as Body;
@@ -94,6 +104,14 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  const hiddenFeatures = Array.isArray(body.hiddenFeatures)
+    ? body.hiddenFeatures.filter((f) => typeof f === "string")
+    : [];
+  const settings: Record<string, unknown> = { ...(body.settings ?? {}) };
+  if (hiddenFeatures.length > 0) {
+    settings.hidden_features = hiddenFeatures;
+  }
+
   const { data: orgData, error: orgError } = await supabaseAdmin
     .from("organizations")
     .insert({
@@ -102,6 +120,7 @@ Deno.serve(async (req: Request) => {
       notes: body.notes || null,
       password_must_change: true,
       is_active: true,
+      settings,
     })
     .select("id")
     .single();

@@ -74,6 +74,19 @@ function MainView({
 }: Props) {
   const [view, setView] = useState<View>("dashboard");
   const [navLoading, setNavLoading] = useState(false);
+
+  // Per-account feature gating. An org's `settings.hidden_features` (e.g.
+  // ["chat", "mailbox"]) hides those features entirely — used for test /
+  // integration-partner accounts that should only see a restricted UI.
+  // Platform admins are never gated.
+  const hiddenFeatures = useMemo<Set<string>>(() => {
+    if (isPlatformAdmin) return new Set();
+    const raw = (org?.settings as { hidden_features?: unknown } | undefined)
+      ?.hidden_features;
+    return new Set(Array.isArray(raw) ? (raw as string[]) : []);
+  }, [isPlatformAdmin, org?.settings]);
+  const chatHidden = hiddenFeatures.has("chat");
+  const mailboxHidden = hiddenFeatures.has("mailbox");
   const [contextOrgId, setContextOrgId] = useState<string | null>(() => {
     if (org?.id) {
       return org.id;
@@ -82,13 +95,17 @@ function MainView({
   });
 
   const navigateTo = useCallback((next: View) => {
+    // Block navigation to gated features (defense-in-depth; the nav entries
+    // are also hidden below).
+    if (next === "chat" && chatHidden) return;
+    if (next === "offers" && mailboxHidden) return;
     setView((current) => {
       if (current === next) return current;
       setNavLoading(true);
       window.setTimeout(() => setNavLoading(false), 420);
       return next;
     });
-  }, []);
+  }, [chatHidden, mailboxHidden]);
 
   const [chats, setChats] = useState<Chat[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
@@ -243,6 +260,7 @@ function MainView({
           >
             Dashboard
           </button>
+          {!chatHidden && (
           <div className={`sidebar-link-row${view === "chat" ? " active" : ""}`}>
             <button
               type="button"
@@ -284,8 +302,9 @@ function MainView({
               </button>
             )}
           </div>
+          )}
 
-          {view === "chat" && (
+          {view === "chat" && !chatHidden && (
             <div className="sidebar-chats">
               {chatGroups.length === 0 && (
                 <p className="sidebar-empty">No conversations yet</p>
@@ -335,13 +354,15 @@ function MainView({
             </div>
           )}
 
-          <button
-            type="button"
-            className={`sidebar-link${view === "offers" ? " active" : ""}`}
-            onClick={() => navigateTo("offers")}
-          >
-            Cotton Mailbox
-          </button>
+          {!mailboxHidden && (
+            <button
+              type="button"
+              className={`sidebar-link${view === "offers" ? " active" : ""}`}
+              onClick={() => navigateTo("offers")}
+            >
+              Cotton Mailbox
+            </button>
+          )}
 
           <button
             type="button"
@@ -433,7 +454,7 @@ function MainView({
         </main>
       )}
 
-      {view === "chat" && (
+      {view === "chat" && !chatHidden && (
         <ChatPanel
           user={user}
           orgId={contextOrgId ?? ""}
@@ -452,7 +473,7 @@ function MainView({
         />
       )}
 
-      {view === "offers" && (
+      {view === "offers" && !mailboxHidden && (
         <main className="app-main" style={{ display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
           <MailboxView isPlatformAdmin={isPlatformAdmin} userName={displayName} orgId={contextOrgId} />
         </main>
